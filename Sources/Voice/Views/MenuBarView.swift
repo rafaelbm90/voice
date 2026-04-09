@@ -34,11 +34,7 @@ struct MenuBarView: View {
                 .keyboardShortcut(.defaultAction)
 
                 Button("Settings") {
-                    dismiss()
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(150))
-                        openSettings()
-                    }
+                    openSettingsWindow()
                 }
             }
 
@@ -153,6 +149,43 @@ struct MenuBarView: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func openSettingsWindow() {
+        dismiss()
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
+            NSApp.activate(ignoringOtherApps: true)
+            openSettings()
+            scheduleSettingsWindowRaise(after: .milliseconds(50))
+            scheduleSettingsWindowRaise(after: .milliseconds(200))
+        }
+    }
+
+    private func scheduleSettingsWindowRaise(after delay: Duration) {
+        Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            raiseSettingsWindowIfPresent()
+        }
+    }
+
+    private func raiseSettingsWindowIfPresent() {
+        let settingsWindow = NSApp.windows.first(where: { window in
+            guard window.isVisible else { return false }
+            guard window.styleMask.contains(.titled) else { return false }
+            guard !(window is NSPanel) else { return false }
+
+            return window.title.localizedCaseInsensitiveContains("settings")
+        }) ?? NSApp.windows.first(where: { window in
+            window.isVisible && window.styleMask.contains(.titled) && !(window is NSPanel)
+        })
+
+        guard let settingsWindow else { return }
+
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow.makeKeyAndOrderFront(nil)
+        settingsWindow.orderFrontRegardless()
     }
 
     private var headerTint: Color {
