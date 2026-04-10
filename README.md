@@ -4,7 +4,7 @@
 
 # Voice
 
-`Voice` is a native macOS menu-bar dictation app focused on local-first speech-to-text. It follows the workflow of tools like SuperWhisper or Wispr Flow while keeping transcription and optional cleanup on-device through `whisper.cpp` and `llama.cpp`.
+`Voice` is a local-first dictation app built around `whisper.cpp` and `llama.cpp`. The primary target is macOS (native menu-bar app), with a terminal-first Linux prototype under `tools/voice-cli`.
 
 ## Features
 
@@ -92,5 +92,6 @@ When the configured executable is `llama-cli`, the app automatically uses the si
 
 ## Linux terminal MVP
 
-The `feature/linux-port-mvp` branch adds a terminal-first Linux prototype under `tools/voice-cli`, including a curses TUI that can be launched with `voice`.
-See `docs/linux-mvp.md` for setup, dependency checks, and the staged Mint porting roadmap.
+A terminal-first prototype lives under `tools/voice-cli`. It covers the same record → transcribe → refine pipeline as the macOS app and includes a curses TUI launchable with the `voice` command.
+
+See `docs/linux-mvp.md` for setup, dependency checks, environment variables, and the porting roadmap.
