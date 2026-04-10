@@ -746,7 +746,7 @@ def run_command_with_status(
             finish_status(f"{status_label} timed out after {int(timeout)}s")
             raise VoiceCliError(f"Command timed out after {int(timeout)} seconds: {printable}")
 
-        time.sleep(0.2)
+        time.sleep(0.1)
 
     stdout, stderr = process.communicate()
     elapsed = time.monotonic() - start
@@ -1258,7 +1258,11 @@ def start_recording_session(out_path: Path, backend: str) -> RecordingSession:
             errors.append(f"{printable}\n{exc}")
             continue
 
-        time.sleep(0.15)
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline:
+            if out_path.exists() and out_path.stat().st_size > 44:
+                break
+            time.sleep(0.01)
         if process.poll() is None:
             return RecordingSession(process, out_path, backend_name, command, time.monotonic())
 
@@ -1870,7 +1874,7 @@ def tui_worker(
     phase: str,
     detail: Callable[[float], str],
     work: Callable[[], T],
-    poll_interval: float = 0.2,
+    poll_interval: float = 0.05,
 ) -> T:
     result: list[T] = []
     error: list[BaseException] = []
@@ -2636,7 +2640,7 @@ def add_audio_processing_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--trim-silence",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Trim leading and trailing silence with ffmpeg before transcription.",
     )
     parser.add_argument(
