@@ -535,6 +535,53 @@ def ensure_paste_focus(command: Sequence[str]) -> None:
         raise VoiceCliError(f"Auto-paste could not find a focused X11 window: {details}")
 
 
+_TERMINAL_WM_CLASSES: frozenset[str] = frozenset({
+    "xterm", "uxterm",
+    "gnome-terminal-server", "gnome-terminal",
+    "konsole",
+    "kitty",
+    "alacritty",
+    "tilix",
+    "urxvt", "rxvt", "rxvt-unicode",
+    "st",
+    "terminator",
+    "xfce4-terminal",
+    "lxterminal",
+    "mate-terminal",
+    "termite",
+    "wezterm-gui",
+    "qterminal",
+    "terminology",
+    "foot",
+    "ghostty",
+})
+
+
+def _detect_paste_key_x11(xdotool: str) -> str:
+    """Query focused window WM_CLASS.
+
+    Returns ctrl+v only when a non-terminal window is positively identified.
+    Falls back to ctrl+shift+v on detection failure or unknown window class.
+    """
+    try:
+        completed = subprocess.run(
+            [xdotool, "getactivewindow", "getwindowclassname"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "ctrl+shift+v"
+    if completed.returncode != 0:
+        return "ctrl+shift+v"
+    class_name = completed.stdout.strip().lower()
+    if not class_name or class_name in _TERMINAL_WM_CLASSES:
+        return "ctrl+shift+v"
+    return "ctrl+v"
+
+
 def paste_command(paste_tool: str, paste_key: str = "auto") -> list[str]:
     if paste_tool == "none":
         raise VoiceCliError("Auto-paste is disabled.")
@@ -548,7 +595,7 @@ def paste_command(paste_tool: str, paste_key: str = "auto") -> list[str]:
     if paste_tool in {"auto", "xdotool"} and x11:
         xdotool = shutil.which("xdotool")
         if xdotool:
-            key = "ctrl+shift+v" if paste_key == "auto" else paste_key
+            key = _detect_paste_key_x11(xdotool) if paste_key == "auto" else paste_key
             return [xdotool, "key", "--clearmodifiers", key]
         if paste_tool == "auto" and can_paste_with_x11_xtest():
             return ["x11-xtest"]
@@ -2730,7 +2777,7 @@ def add_paste_args(parser: argparse.ArgumentParser) -> None:
         "--paste-key",
         choices=("auto", "ctrl+v", "ctrl+shift+v", "shift+insert"),
         default="auto",
-        help="Key combo used to paste. auto defaults to ctrl+shift+v; override with ctrl+v for GUI apps.",
+        help="Key combo used to paste. auto detects terminal vs GUI via WM_CLASS on X11 (ctrl+shift+v fallback).",
     )
 
 
