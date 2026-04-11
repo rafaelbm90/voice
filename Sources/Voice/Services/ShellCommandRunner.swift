@@ -8,7 +8,7 @@ struct CommandResult {
 
 struct ShellCommandRunner: Sendable {
     func run(executable: String, arguments: [String], timeout: TimeInterval? = nil) async throws -> CommandResult {
-        let executable = executable.trimmingCharacters(in: .whitespacesAndNewlines)
+        let executable = (executable.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         let toolName = URL(fileURLWithPath: executable).lastPathComponent
 
         guard FileManager.default.isExecutableFile(atPath: executable) else {

@@ -217,6 +217,26 @@ final class AppSettings: ObservableObject {
         return filename.contains(".en.") || filename.hasSuffix(".en.bin")
     }
 
+    @discardableResult
+    func resolveWhisperExecutable() -> Bool {
+        guard let path = Self.detectedExecutablePath(named: "whisper-cli") else {
+            return false
+        }
+
+        whisperExecutablePath = path
+        return true
+    }
+
+    @discardableResult
+    func resolveLlamaExecutable() -> Bool {
+        guard let path = Self.detectedExecutablePath(named: "llama-cli") else {
+            return false
+        }
+
+        llamaExecutablePath = path
+        return true
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         triggerMode = RecordingTriggerMode(rawValue: defaults.string(forKey: Keys.triggerMode.rawValue) ?? "") ?? .holdToTalk
@@ -281,12 +301,33 @@ final class AppSettings: ObservableObject {
     }
 
     private static func defaultExecutablePath(named name: String) -> String {
-        let candidates = [
-            "/opt/homebrew/bin/\(name)",
-            "/usr/local/bin/\(name)",
+        detectedExecutablePath(named: name) ?? executableSearchCandidates(named: name).first ?? name
+    }
+
+    private static func detectedExecutablePath(named name: String) -> String? {
+        executableSearchCandidates(named: name).first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+
+    private static func executableSearchCandidates(named name: String) -> [String] {
+        let commonDirectories = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            NSHomeDirectory() + "/.local/bin",
+            NSHomeDirectory() + "/bin",
         ]
 
-        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) ?? candidates[0]
+        let pathDirectories = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+
+        let directories = (commonDirectories + pathDirectories).map(normalizedPath)
+        let candidates = directories.map { "\($0)/\(name)" }
+
+        var seen: Set<String> = []
+
+        return candidates.filter { candidate in
+            seen.insert(candidate).inserted
+        }
     }
 
     private func firstBlockingIssue(in validations: [PathValidation]) -> String? {
@@ -303,7 +344,7 @@ final class AppSettings: ObservableObject {
     }
 
     private static func validateExecutable(path: String, displayName: String, expectedName: String) -> PathValidation {
-        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPath = normalizedPath(path)
 
         guard !trimmedPath.isEmpty else {
             return PathValidation(status: .invalid, message: "\(displayName) path is missing.")
@@ -325,7 +366,7 @@ final class AppSettings: ObservableObject {
     }
 
     private static func validateFile(path: String, displayName: String, preferredExtension: String) -> PathValidation {
-        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPath = normalizedPath(path)
 
         guard !trimmedPath.isEmpty else {
             return PathValidation(status: .invalid, message: "\(displayName) path is missing.")
@@ -345,6 +386,12 @@ final class AppSettings: ObservableObject {
         }
 
         return PathValidation(status: .valid, message: "\(displayName) is ready.")
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return (trimmed as NSString).expandingTildeInPath
     }
 
     private enum Keys: String {
