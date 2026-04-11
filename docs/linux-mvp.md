@@ -110,10 +110,12 @@ VOICE_TRIM_SILENCE_MS=250
 VOICE_TRIM_SILENCE_THRESHOLD=-45dB
 VOICE_MIN_SPEECH_SECONDS=0.25
 VOICE_SECONDS=5    # only used by --auto-run or --once
-VOICE_AUTO_PASTE=1
+VOICE_AUTO_PASTE=1 # explicit opt-in on Wayland; X11 default is on, Wayland default is off
 VOICE_PASTE_DELAY_MS=120
-VOICE_PASTE_TOOL=auto # auto, xdotool, or wtype
+VOICE_PASTE_TOOL=auto # auto, xdotool, wtype, or none
 VOICE_HOTKEY=Ctrl+Alt+space # optional override; otherwise use saved shortcut
+VOICE_SOCKET_PATH=/run/user/$UID/voice/voice.sock # optional daemon socket override
+VOICE_SHORTCUT_BACKEND=auto # daemon only: auto, portal, or external
 ```
 
 Override defaults with environment variables or pass additional TUI flags:
@@ -146,18 +148,22 @@ Face repository, shows size, RAM, and speed/accuracy profile, downloads to
 the selected model, press `A` to activate a downloaded model, and press `X` to
 delete a downloaded model.
 
-The current global hotkey is shown in the dashboard and can trigger the same
-start/stop cycle even when the terminal is not focused. Press `H` to enter
-shortcut recording mode, then press the next key combination, such as
-`Super+Shift+R`, to update the global binding in the running app. The shortcut
-is saved to `~/.config/voice/config.json` and reused on the next launch. The
-final output is copied to the clipboard when `wl-copy`, `xclip`, `xsel`, or an
-OSC 52-capable terminal is available. Auto-paste is enabled by default: on Linux
-Mint Cinnamon/X11 it sends `Ctrl+V` with `xdotool` when installed, otherwise it
-uses a native XTest fallback through `libX11`/`libXtst`; on Wayland it can use
-`wtype` when available. Use `--no-auto-paste` or `VOICE_AUTO_PASTE=0` to only
-copy. Press `Q` to quit. For a one-shot timed smoke test that exits
-automatically using the active model:
+The dashboard now shows which shortcut backend is active. On X11 it can run the
+built-in listener and still supports `H` to capture the next shortcut, such as
+`Super+Shift+R`, saving it to `~/.config/voice/config.json`. On Wayland the TUI
+shows the daemon-based path. When the desktop exposes the XDG GlobalShortcuts
+portal, `voice daemon` will try to register the saved shortcut automatically; if
+the portal is unavailable, bind your desktop shortcut to `voice trigger --action
+toggle`. The final output is copied to the clipboard when `wl-copy`, `xclip`,
+`xsel`, or an OSC 52-capable terminal is available. Auto-paste is enabled by
+default on X11: on Linux Mint Cinnamon/X11 it sends `Ctrl+V` with `xdotool`
+when installed, otherwise it uses a native XTest fallback through
+`libX11`/`libXtst`. On Wayland the default is copy-only to avoid unexpected
+Remote Desktop / input-injection prompts. Opt into Wayland paste with
+`--auto-paste`, `VOICE_AUTO_PASTE=1`, or an explicit `--paste-tool wtype`.
+Use `--no-auto-paste`, `VOICE_AUTO_PASTE=0`, or `--paste-tool none` to force
+copy-only behavior. Press `Q` to quit. For a one-shot timed smoke test that
+exits automatically using the active model:
 
 ```bash
 python3 tools/voice-cli/voice.py tui --once --hold-seconds 1 \
@@ -191,9 +197,63 @@ The hotkey backend uses X11 `XGrabKey` through `libX11`, so it does not need
 root access or input-device permissions and does not observe normal typing. The
 TUI shortcut recorder temporarily uses `XGrabKeyboard` only while the app is in
 the `Record Shortcut` state. This is the intended path for Linux Mint Cinnamon
-on X11. Wayland does not allow arbitrary global keyboard grabs, so the built-in
-hotkey daemon is X11-only. On Wayland, use a compositor or desktop-environment
-shortcut to launch a Voice command instead.
+on X11.
+
+Wayland does not allow arbitrary global keyboard grabs, so the built-in hotkey
+daemon is X11-only. The Wayland path now runs through the background daemon:
+
+```bash
+voice daemon
+```
+
+The recommended long-running setup on Wayland is the systemd user service:
+
+```bash
+systemctl --user enable --now voice-daemon.service
+```
+
+If the desktop implements the XDG GlobalShortcuts portal, the daemon will try to
+register the configured shortcut automatically. This path uses `python3-gi` for
+DBus access and registers the host app id `dev.rbm.voice` so the portal can
+associate Voice with `dev.rbm.voice.desktop`. If the portal is unavailable, or
+if you want to force the external-command path, bind your compositor or desktop
+environment shortcut to:
+
+```bash
+voice trigger --action toggle
+```
+
+Force external-command mode even when the portal exists:
+
+```bash
+voice daemon --shortcut-backend external
+```
+
+Useful manual commands:
+
+```bash
+voice model-install --recommended --profile cpu --activate
+voice shortcut-status
+voice service status
+voice service restart
+voice service logs --lines 100
+systemctl --user status voice-daemon.service
+systemctl --user restart voice-daemon.service
+systemctl --user stop voice-daemon.service
+voice trigger --action start
+voice trigger --action stop
+voice trigger --action status
+```
+
+Optional service overrides live in:
+
+```bash
+~/.config/voice/daemon.env
+```
+
+The installer drops a commented template there. Set values like
+`VOICE_SHORTCUT_BACKEND=portal` or `VOICE_AUTO_PASTE=1`, then restart the user
+service.
 
 ## Automated Setup
 
@@ -204,11 +264,39 @@ bash tools/voice-cli/install.sh
 ```
 
 This installs system packages through `apt` or `dnf`, auto-detects your GPU
-(NVIDIA CUDA, Vulkan, or CPU+OpenBLAS), builds `whisper-cli` from source, and
-symlinks the `voice` command to `~/.local/bin`. Re-run with `--update` to pull
-the latest whisper.cpp and rebuild.
+(NVIDIA CUDA, Vulkan, or CPU+OpenBLAS), builds `whisper-cli` from source,
+symlinks the `voice` command to `~/.local/bin`, and installs
+`~/.local/share/applications/dev.rbm.voice.desktop` so Wayland portal backends
+can resolve the Voice app id. It also installs `voice-daemon.service` into the
+systemd user directory, writes a commented `~/.config/voice/daemon.env`
+template, downloads and activates a default Whisper model, writes
+`~/.config/voice/install-state.json`, and enables the service immediately when
+the user manager is reachable. Re-run with `--update` to pull the latest
+whisper.cpp and rebuild.
 
-After setup, launch the TUI and press `M` to download a Whisper model, then `R` to record.
+The installer now defaults to the `small` Whisper model so first-time setup
+finishes faster. Override that choice if needed:
+
+```bash
+VOICE_INSTALL_MODEL_KEY=small bash tools/voice-cli/install.sh
+```
+
+The installer also supports a paired reset flow for fresh-install testing and
+uninstalling:
+
+```bash
+bash tools/voice-cli/install.sh --reset --dry-run
+bash tools/voice-cli/install.sh --reset
+bash tools/voice-cli/install.sh --reset --remove-packages
+```
+
+`--reset` removes Voice-managed artifacts only. `--remove-packages` adds
+package cleanup for the installer's known `apt` or `dnf` package set after a
+single confirmation step. `--dry-run` prints the grouped reset plan without
+changing anything.
+
+After setup, launch the TUI and press `R` to record. Press `M` later only if
+you want to switch away from the installer's default model.
 
 ---
 
@@ -245,7 +333,7 @@ sudo dnf install -y \
 Vulkan path:
 
 ```bash
-sudo dnf install -y vulkan-tools glslc
+sudo dnf install -y vulkan-tools vulkan-loader-devel shaderc
 vulkaninfo
 ```
 
@@ -325,5 +413,6 @@ Stage 5: TUI
 Stage 6: Desktop integration
 
 - Clipboard copy is wired through `wl-copy`, `xclip`, `xsel`, or OSC 52.
-- Auto-paste sends the clipboard with `xdotool` or native XTest on X11, or
-  `wtype` on Wayland, with a configurable delay before the paste shortcut.
+- Auto-paste sends the clipboard with `xdotool` or native XTest on X11.
+- Wayland defaults to copy-only; `wtype` keyboard injection is opt-in because
+  it can trigger Remote Desktop / remote interaction permission prompts.
