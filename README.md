@@ -55,6 +55,9 @@ Typical Apple Silicon locations:
 - `llama-cli`: `/opt/homebrew/bin/llama-cli`
 - `llama-completion`: `/opt/homebrew/bin/llama-completion`
 
+The macOS app resolves CLIs from common install locations including
+`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, and `~/bin`.
+
 Then build and run:
 
 ```bash
@@ -92,7 +95,7 @@ See `docs/linux-mvp.md` for GPU options, manual steps, and troubleshooting.
 1. Launch the app with `voice` or `./voice`.
 2. Open the menu bar item and then open `Settings`.
 3. Grant Microphone and Accessibility access.
-4. Resolve `whisper-cli` from Settings if needed.
+4. Resolve `whisper-cli` from Settings if needed. This works even for a future packaged `.app`, which may not inherit your shell `PATH`.
 5. Download a Whisper model from the built-in catalog, or browse to a local `.bin` file.
 6. Optionally enable second-pass cleanup and configure `llama.cpp`.
 
