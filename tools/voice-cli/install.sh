@@ -6,7 +6,7 @@
 #   bash tools/voice-cli/install.sh --update  # pull latest whisper.cpp + rebuild
 #   bash tools/voice-cli/install.sh --help
 
-set -u
+set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Resolve script and repo root (symlink-safe, same pattern as voice wrapper)
@@ -172,12 +172,25 @@ detect_gpu() {
   step "Detecting GPU..."
 
   if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
-    CMAKE_GPU_FLAGS="-DGGML_CUDA=ON"
-    GPU_LABEL="NVIDIA CUDA"
-    ok "GPU: ${GPU_LABEL}"
-    warn "Ensure the CUDA toolkit is installed before building."
-    warn "See docs/linux-mvp.md for CUDA setup instructions."
-  elif command -v vulkaninfo &>/dev/null && vulkaninfo &>/dev/null 2>&1; then
+    if command -v nvcc &>/dev/null 2>&1; then
+      CMAKE_GPU_FLAGS="-DGGML_CUDA=ON"
+      GPU_LABEL="NVIDIA CUDA"
+      ok "GPU: ${GPU_LABEL}"
+      return 0
+    fi
+
+    if [[ -n "${CUDAToolkit_ROOT:-}" ]] && [[ -d "${CUDAToolkit_ROOT}" ]]; then
+      CMAKE_GPU_FLAGS="-DGGML_CUDA=ON"
+      GPU_LABEL="NVIDIA CUDA"
+      ok "GPU: ${GPU_LABEL} (via CUDAToolkit_ROOT)"
+      return 0
+    fi
+
+    warn "NVIDIA GPU detected but CUDA toolkit not found. Falling back to non-CUDA build."
+    warn "Install CUDA and set CUDAToolkit_ROOT if you want CUDA acceleration."
+  fi
+
+  if command -v vulkaninfo &>/dev/null && vulkaninfo &>/dev/null 2>&1; then
     CMAKE_GPU_FLAGS="-DGGML_VULKAN=1"
     GPU_LABEL="Vulkan"
     ok "GPU: ${GPU_LABEL}"
