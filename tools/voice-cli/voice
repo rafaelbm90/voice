@@ -13,54 +13,68 @@ while [ -L "${SOURCE}" ]; do
 done
 SCRIPT_DIR="$(cd -- "$(dirname -- "${SOURCE}")" && pwd)"
 
-DEFAULT_ARGS=(
+DOCTOR_ARGS=()
+PIPELINE_ARGS=(
   --refine "${VOICE_REFINE:-heuristic}"
   --whisper-timeout "${VOICE_WHISPER_TIMEOUT:-120}"
 )
+if [[ -n "${VOICE_WHISPER_CLI:-}" ]]; then
+  DOCTOR_ARGS+=(--whisper-cli "${VOICE_WHISPER_CLI}")
+  PIPELINE_ARGS+=(--whisper-cli "${VOICE_WHISPER_CLI}")
+fi
+if [[ -n "${VOICE_LLAMA_CLI:-}" ]]; then
+  DOCTOR_ARGS+=(--llama-cli "${VOICE_LLAMA_CLI}")
+  PIPELINE_ARGS+=(--llama-cli "${VOICE_LLAMA_CLI}")
+fi
 if [[ -n "${VOICE_WHISPER_MODEL:-}" ]]; then
-  DEFAULT_ARGS+=(--whisper-model "${VOICE_WHISPER_MODEL}")
+  DOCTOR_ARGS+=(--whisper-model "${VOICE_WHISPER_MODEL}")
+  PIPELINE_ARGS+=(--whisper-model "${VOICE_WHISPER_MODEL}")
+fi
+if [[ -n "${VOICE_LLAMA_MODEL:-}" ]]; then
+  DOCTOR_ARGS+=(--llama-model "${VOICE_LLAMA_MODEL}")
+  PIPELINE_ARGS+=(--llama-model "${VOICE_LLAMA_MODEL}")
 fi
 if [[ -n "${VOICE_LANGUAGE:-}" ]]; then
-  DEFAULT_ARGS+=(--language "${VOICE_LANGUAGE}")
+  PIPELINE_ARGS+=(--language "${VOICE_LANGUAGE}")
 fi
 if [[ -n "${VOICE_WHISPER_THREADS:-}" ]]; then
-  DEFAULT_ARGS+=(--whisper-threads "${VOICE_WHISPER_THREADS}")
+  PIPELINE_ARGS+=(--whisper-threads "${VOICE_WHISPER_THREADS}")
 fi
 if [[ -n "${VOICE_WHISPER_BEAM_SIZE:-}" ]]; then
-  DEFAULT_ARGS+=(--whisper-beam-size "${VOICE_WHISPER_BEAM_SIZE}")
+  PIPELINE_ARGS+=(--whisper-beam-size "${VOICE_WHISPER_BEAM_SIZE}")
 fi
 if [[ -n "${VOICE_WHISPER_BEST_OF:-}" ]]; then
-  DEFAULT_ARGS+=(--whisper-best-of "${VOICE_WHISPER_BEST_OF}")
+  PIPELINE_ARGS+=(--whisper-best-of "${VOICE_WHISPER_BEST_OF}")
 fi
 if [[ "${VOICE_WHISPER_FALLBACK:-0}" =~ ^(1|true|True|yes|Yes)$ ]]; then
-  DEFAULT_ARGS+=(--whisper-fallback)
+  PIPELINE_ARGS+=(--whisper-fallback)
 fi
 if [[ -n "${VOICE_WHISPER_MAX_CONTEXT:-}" ]]; then
-  DEFAULT_ARGS+=(--whisper-max-context "${VOICE_WHISPER_MAX_CONTEXT}")
+  PIPELINE_ARGS+=(--whisper-max-context "${VOICE_WHISPER_MAX_CONTEXT}")
 fi
 if [[ "${VOICE_TRIM_SILENCE:-1}" =~ ^(0|false|False|no|No)$ ]]; then
-  DEFAULT_ARGS+=(--no-trim-silence)
+  PIPELINE_ARGS+=(--no-trim-silence)
 fi
 if [[ -n "${VOICE_TRIM_SILENCE_MS:-}" ]]; then
-  DEFAULT_ARGS+=(--trim-silence-ms "${VOICE_TRIM_SILENCE_MS}")
+  PIPELINE_ARGS+=(--trim-silence-ms "${VOICE_TRIM_SILENCE_MS}")
 fi
 if [[ -n "${VOICE_TRIM_SILENCE_THRESHOLD:-}" ]]; then
-  DEFAULT_ARGS+=(--trim-silence-threshold "${VOICE_TRIM_SILENCE_THRESHOLD}")
+  PIPELINE_ARGS+=(--trim-silence-threshold "${VOICE_TRIM_SILENCE_THRESHOLD}")
 fi
 if [[ -n "${VOICE_MIN_SPEECH_SECONDS:-}" ]]; then
-  DEFAULT_ARGS+=(--min-speech-seconds "${VOICE_MIN_SPEECH_SECONDS}")
+  PIPELINE_ARGS+=(--min-speech-seconds "${VOICE_MIN_SPEECH_SECONDS}")
 fi
 if [[ "${VOICE_AUTO_PASTE:-1}" =~ ^(0|false|False|no|No)$ ]]; then
-  DEFAULT_ARGS+=(--no-auto-paste)
+  PIPELINE_ARGS+=(--no-auto-paste)
 fi
 if [[ -n "${VOICE_PASTE_DELAY_MS:-}" ]]; then
-  DEFAULT_ARGS+=(--paste-delay-ms "${VOICE_PASTE_DELAY_MS}")
+  PIPELINE_ARGS+=(--paste-delay-ms "${VOICE_PASTE_DELAY_MS}")
 fi
 if [[ -n "${VOICE_PASTE_TOOL:-}" ]]; then
-  DEFAULT_ARGS+=(--paste-tool "${VOICE_PASTE_TOOL}")
+  PIPELINE_ARGS+=(--paste-tool "${VOICE_PASTE_TOOL}")
 fi
 if [[ -n "${VOICE_HOTKEY:-}" ]]; then
-  DEFAULT_ARGS+=(--hotkey "${VOICE_HOTKEY}")
+  PIPELINE_ARGS+=(--hotkey "${VOICE_HOTKEY}")
 fi
 
 COMMAND="${1:-tui}"
@@ -77,6 +91,16 @@ COMMAND_ARGS=()
 if [[ "${COMMAND}" == "tui" ]]; then
   COMMAND_ARGS+=(--seconds "${VOICE_SECONDS:-5}")
 fi
+
+DEFAULT_ARGS=()
+case "${COMMAND}" in
+  doctor)
+    DEFAULT_ARGS=("${DOCTOR_ARGS[@]}")
+    ;;
+  run|tui|hotkey)
+    DEFAULT_ARGS=("${PIPELINE_ARGS[@]}")
+    ;;
+esac
 
 exec python3 -B "${SCRIPT_DIR}/voice.py" "${COMMAND}" \
   "${COMMAND_ARGS[@]}" \
