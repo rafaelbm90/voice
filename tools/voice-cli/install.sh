@@ -2,11 +2,14 @@
 # install.sh — single-command Linux setup for Voice
 #
 # Usage:
-#   bash tools/voice-cli/install.sh           # first install
-#   bash tools/voice-cli/install.sh --update  # pull latest whisper.cpp + rebuild
+#   bash tools/voice-cli/install.sh                       # first install
+#   bash tools/voice-cli/install.sh --update              # pull latest whisper.cpp + rebuild
+#   bash tools/voice-cli/install.sh --gpu cpu            # force CPU + OpenBLAS
+#   bash tools/voice-cli/install.sh --gpu vulkan         # force Vulkan
+#   bash tools/voice-cli/install.sh --gpu cuda           # force CUDA
 #   bash tools/voice-cli/install.sh --help
 
-set -u
+set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Resolve script and repo root (symlink-safe, same pattern as voice wrapper)
@@ -39,24 +42,54 @@ WHISPER_REPO="https://github.com/ggerganov/whisper.cpp.git"
 # Argument parsing
 # ---------------------------------------------------------------------------
 UPDATE=0
-for arg in "$@"; do
-  case "${arg}" in
-    --update)   UPDATE=1 ;;
+GPU_MODE="auto"
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --update)
+      UPDATE=1
+      shift
+      ;;
+    --gpu)
+      if [[ "$#" -lt 2 ]]; then
+        echo "Missing value for --gpu. Expected one of: auto, cpu, vulkan, cuda" >&2
+        exit 1
+      fi
+      GPU_MODE="${2,,}"
+      shift 2
+      ;;
+    --gpu=*)
+      GPU_MODE="${1#--gpu=}"
+      GPU_MODE="${GPU_MODE,,}"
+      shift
+      ;;
     --help|-h)
-      echo "Usage: bash tools/voice-cli/install.sh [--update]"
+      echo "Usage: bash tools/voice-cli/install.sh [--update] [--gpu auto|cpu|vulkan|cuda]"
       echo ""
       echo "  (no flags)  Install system packages, build whisper.cpp, wire voice command."
       echo "              Skips whisper.cpp build if the binary already exists."
       echo "  --update    Pull the latest whisper.cpp and rebuild before installing."
+      echo "  --gpu MODE  Select backend: auto, cpu, vulkan, or cuda."
+      echo "              auto inspects hardware, installs Vulkan packages when useful,"
+      echo "              and falls back to CPU if no validated accelerator is usable."
       exit 0
       ;;
     *)
-      echo "Unknown argument: ${arg}" >&2
+      echo "Unknown argument: $1" >&2
       echo "Run with --help for usage." >&2
       exit 1
       ;;
   esac
 done
+
+case "${GPU_MODE}" in
+  auto|cpu|vulkan|cuda) ;;
+  *)
+    echo "Unknown GPU mode: ${GPU_MODE}" >&2
+    echo "Expected one of: auto, cpu, vulkan, cuda" >&2
+    exit 1
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Print helpers
@@ -109,7 +142,7 @@ install_apt_packages() {
   local packages=(
     git build-essential cmake ninja-build pkg-config ccache curl wget
     ffmpeg sox xclip xdotool python3
-    libopenblas-dev
+    libopenblas-dev pciutils
   )
 
   # Audio: if PipeWire/PulseAudio is already running keep it; otherwise add ALSA
@@ -118,35 +151,200 @@ install_apt_packages() {
   else
     packages+=(alsa-utils)
   fi
-
   sudo apt-get install -y --no-upgrade "${packages[@]}"
 
   ok "System packages installed"
 }
 
+install_optional_apt_packages() {
+  if [[ "$#" -eq 0 ]]; then
+    return 0
+  fi
+
+  step "Installing optional packages: $*"
+  sudo apt-get install -y --no-upgrade "$@"
+  ok "Optional packages installed"
+}
+
 # ---------------------------------------------------------------------------
-# detect_gpu — sets CMAKE_GPU_FLAGS and GPU_LABEL
+# select_gpu_backend — sets CMAKE_GPU_FLAGS and GPU_LABEL
 # ---------------------------------------------------------------------------
 CMAKE_GPU_FLAGS=""
 GPU_LABEL=""
+GPU_KIND="unknown"
+GPU_SUMMARY="unknown"
 
-detect_gpu() {
-  step "Detecting GPU..."
+set_cpu_backend() {
+  CMAKE_GPU_FLAGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
+  GPU_LABEL="CPU + OpenBLAS"
+}
 
-  if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
-    CMAKE_GPU_FLAGS="-DGGML_CUDA=ON"
-    GPU_LABEL="NVIDIA CUDA"
-    ok "GPU: ${GPU_LABEL}"
-    warn "Ensure the CUDA toolkit is installed before building."
-    warn "See docs/linux-mvp.md for CUDA setup instructions."
-  elif command -v vulkaninfo &>/dev/null && vulkaninfo &>/dev/null 2>&1; then
-    CMAKE_GPU_FLAGS="-DGGML_VULKAN=1"
-    GPU_LABEL="Vulkan"
-    ok "GPU: ${GPU_LABEL}"
-  else
-    CMAKE_GPU_FLAGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
-    GPU_LABEL="CPU + OpenBLAS"
-    ok "GPU: none detected — using ${GPU_LABEL}"
+set_vulkan_backend() {
+  CMAKE_GPU_FLAGS="-DGGML_VULKAN=1"
+  GPU_LABEL="Vulkan"
+}
+
+set_cuda_backend() {
+  CMAKE_GPU_FLAGS="-DGGML_CUDA=ON"
+  GPU_LABEL="NVIDIA CUDA"
+}
+
+vulkan_build_ready() {
+  command -v glslc &>/dev/null && pkg-config --exists vulkan
+}
+
+cuda_build_ready() {
+  command -v nvcc &>/dev/null
+}
+
+vulkan_runtime_ready() {
+  command -v vulkaninfo &>/dev/null && vulkaninfo &>/dev/null 2>&1
+}
+
+detect_graphics_hardware() {
+  local summary="unknown"
+  local kind="unknown"
+  local inventory=""
+
+  if command -v lspci &>/dev/null; then
+    inventory="$(lspci -nn | grep -Ei 'vga|3d|display' || true)"
+  fi
+
+  if [[ -n "${inventory}" ]]; then
+    summary="$(printf '%s' "${inventory}" | paste -sd '; ' -)"
+    local inventory_lc
+    inventory_lc="$(printf '%s' "${inventory}" | tr '[:upper:]' '[:lower:]')"
+
+    if [[ "${inventory_lc}" == *nvidia* ]]; then
+      kind="nvidia"
+    elif [[ "${inventory_lc}" == *amd* ]] || [[ "${inventory_lc}" == *advanced\ micro\ devices* ]] || [[ "${inventory_lc}" == *radeon* ]]; then
+      kind="amd"
+    elif [[ "${inventory_lc}" == *intel* ]]; then
+      if [[ "${inventory_lc}" == *arc* ]] || [[ "${inventory_lc}" == *dg2* ]] || [[ "${inventory_lc}" == *bmg* ]]; then
+        kind="intel-arc"
+      else
+        kind="intel-integrated"
+      fi
+    fi
+  elif command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
+    summary="NVIDIA GPU detected via nvidia-smi"
+    kind="nvidia"
+  fi
+
+  GPU_KIND="${kind}"
+  GPU_SUMMARY="${summary}"
+}
+
+ensure_vulkan_packages() {
+  local packages=(libvulkan-dev vulkan-tools glslc)
+
+  if [[ "${GPU_KIND}" == "amd" ]] || [[ "${GPU_KIND}" == "intel-arc" ]] || [[ "${GPU_KIND}" == "intel-integrated" ]]; then
+    packages+=(mesa-vulkan-drivers)
+  fi
+
+  install_optional_apt_packages "${packages[@]}"
+}
+
+try_enable_vulkan_backend() {
+  ensure_vulkan_packages
+
+  if ! vulkan_runtime_ready; then
+    return 1
+  fi
+  if ! vulkan_build_ready; then
+    return 1
+  fi
+
+  set_vulkan_backend
+  return 0
+}
+
+select_gpu_backend() {
+  detect_graphics_hardware
+
+  if [[ "${GPU_MODE}" == "auto" ]]; then
+    step "Detecting GPU..."
+    ok "Graphics: ${GPU_SUMMARY}"
+
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1 && cuda_build_ready; then
+      set_cuda_backend
+      ok "GPU: ${GPU_LABEL}"
+    elif [[ "${GPU_KIND}" == "amd" ]] || [[ "${GPU_KIND}" == "intel-arc" ]]; then
+      if try_enable_vulkan_backend; then
+        ok "GPU: ${GPU_LABEL}"
+      else
+        set_cpu_backend
+        warn "Vulkan was preferred for ${GPU_SUMMARY}, but the runtime or build dependencies are not usable."
+        ok "Falling back to ${GPU_LABEL}"
+      fi
+    elif [[ "${GPU_KIND}" == "nvidia" ]]; then
+      if try_enable_vulkan_backend; then
+        warn "NVIDIA GPU detected without a usable CUDA toolkit; using Vulkan instead."
+        ok "GPU: ${GPU_LABEL}"
+      else
+        set_cpu_backend
+        warn "NVIDIA GPU detected, but CUDA is not build-ready and Vulkan is not usable."
+        warn "Install the CUDA toolkit for the fastest NVIDIA path, or force --gpu vulkan if your driver stack supports it."
+        ok "Falling back to ${GPU_LABEL}"
+      fi
+    elif [[ "${GPU_KIND}" == "intel-integrated" ]]; then
+      set_cpu_backend
+      warn "Intel integrated graphics detected; auto mode prefers ${GPU_LABEL} for stability."
+      warn "If you want to experiment with GPU inference, rerun with --gpu vulkan."
+      ok "GPU: ${GPU_LABEL}"
+    else
+      set_cpu_backend
+      ok "GPU: no supported accelerator detected — using ${GPU_LABEL}"
+    fi
+
+    return 0
+  fi
+
+  step "Using requested GPU mode: ${GPU_MODE}"
+
+  case "${GPU_MODE}" in
+    cpu)
+      set_cpu_backend
+      ok "GPU: forced ${GPU_LABEL}"
+      ;;
+    vulkan)
+      ensure_vulkan_packages
+      if ! vulkan_runtime_ready; then
+        die "Requested --gpu vulkan, but the Vulkan runtime is unavailable or failed validation."
+      fi
+      if ! vulkan_build_ready; then
+        die "Requested --gpu vulkan, but Vulkan build dependencies are missing after installation."
+      fi
+      set_vulkan_backend
+      ok "GPU: forced ${GPU_LABEL}"
+      ;;
+    cuda)
+      if ! cuda_build_ready; then
+        die "Requested --gpu cuda, but nvcc was not found. Install the CUDA toolkit first."
+      fi
+      set_cuda_backend
+      ok "GPU: forced ${GPU_LABEL}"
+      if ! command -v nvidia-smi &>/dev/null || ! nvidia-smi &>/dev/null 2>&1; then
+        warn "nvidia-smi is unavailable or failed; the NVIDIA runtime was not validated."
+      fi
+      ;;
+  esac
+}
+
+configure_whisper_cpp() {
+  local gpu_flags="$1"
+  local gpu_label="$2"
+
+  rm -rf "${WHISPER_BUILD_DIR}"
+
+  step "Configuring whisper.cpp (${gpu_label})..."
+  # shellcheck disable=SC2086
+  if ! cmake -B "${WHISPER_BUILD_DIR}" \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        ${gpu_flags} \
+        -S "${WHISPER_SRC_DIR}"; then
+    return 1
   fi
 }
 
@@ -173,14 +371,15 @@ build_whisper_cpp() {
     git -C "${WHISPER_SRC_DIR}" pull --ff-only
   fi
 
-  # Configure
-  step "Configuring whisper.cpp (${GPU_LABEL})..."
-  # shellcheck disable=SC2086
-  cmake -B "${WHISPER_BUILD_DIR}" \
-        -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        ${CMAKE_GPU_FLAGS} \
-        -S "${WHISPER_SRC_DIR}"
+  if ! configure_whisper_cpp "${CMAKE_GPU_FLAGS}" "${GPU_LABEL}"; then
+    if [[ "${GPU_MODE}" != "auto" ]] || [[ "${GPU_LABEL}" == "CPU + OpenBLAS" ]]; then
+      die "whisper.cpp configuration failed for ${GPU_LABEL}."
+    fi
+
+    warn "whisper.cpp configuration failed with ${GPU_LABEL}; retrying with CPU + OpenBLAS."
+    set_cpu_backend
+    configure_whisper_cpp "${CMAKE_GPU_FLAGS}" "${GPU_LABEL}"
+  fi
 
   # Build only the whisper-cli target to avoid building tests and extras
   step "Building whisper-cli (this takes a few minutes)..."
@@ -189,7 +388,7 @@ build_whisper_cpp() {
         -j "$(nproc)"
 
   if [[ ! -x "${WHISPER_BIN}" ]]; then
-    die "Build succeeded but whisper-cli binary not found at ${WHISPER_BIN}"
+    die "Build finished but whisper-cli binary was not found at ${WHISPER_BIN}"
   fi
 
   ok "whisper-cli built at ${WHISPER_BIN}"
@@ -290,7 +489,7 @@ main() {
 
   check_prerequisites
   install_apt_packages
-  detect_gpu
+  select_gpu_backend
   build_whisper_cpp
   install_symlinks
   ensure_path
