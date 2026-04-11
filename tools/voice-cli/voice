@@ -63,12 +63,22 @@ if [[ -n "${VOICE_HOTKEY:-}" ]]; then
   DEFAULT_ARGS+=(--hotkey "${VOICE_HOTKEY}")
 fi
 
-if [[ "${1:-}" == "hotkey" ]]; then
-  shift
-  exec python3 -B "${SCRIPT_DIR}/voice.py" hotkey "${DEFAULT_ARGS[@]}" "$@"
+COMMAND="${1:-tui}"
+case "${COMMAND}" in
+  doctor|record|transcribe|refine|run|tui|hotkey)
+    shift || true
+    ;;
+  *)
+    COMMAND="tui"
+    ;;
+esac
+
+COMMAND_ARGS=()
+if [[ "${COMMAND}" == "tui" ]]; then
+  COMMAND_ARGS+=(--seconds "${VOICE_SECONDS:-5}")
 fi
 
-exec python3 -B "${SCRIPT_DIR}/voice.py" tui \
-  --seconds "${VOICE_SECONDS:-5}" \
+exec python3 -B "${SCRIPT_DIR}/voice.py" "${COMMAND}" \
+  "${COMMAND_ARGS[@]}" \
   "${DEFAULT_ARGS[@]}" \
   "$@"
