@@ -79,11 +79,20 @@ ln -sfn "$PWD/voice" ~/.local/bin/voice
 bash tools/voice-cli/install.sh
 ```
 
-Installs system packages, builds `whisper.cpp` with GPU acceleration if available,
-and wires the `voice` command to `~/.local/bin`. Then:
+Installs system packages, inspects your hardware, picks the best validated
+backend it can, builds `whisper.cpp`, and wires the `voice` command to
+`~/.local/bin`. Then:
 
 ```bash
 voice        # launch the TUI
+```
+
+Force a specific backend when needed:
+
+```bash
+bash tools/voice-cli/install.sh --gpu cpu
+bash tools/voice-cli/install.sh --gpu vulkan
+bash tools/voice-cli/install.sh --gpu cuda
 ```
 
 See `docs/linux-mvp.md` for GPU options, manual steps, and troubleshooting.

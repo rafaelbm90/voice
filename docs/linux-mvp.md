@@ -202,9 +202,30 @@ The recommended path is the install script:
 bash tools/voice-cli/install.sh
 ```
 
-This installs system packages, auto-detects your GPU (NVIDIA CUDA, Vulkan, or CPU+OpenBLAS),
-builds `whisper-cli` from source, and symlinks the `voice` command to `~/.local/bin`.
+This installs system packages, inspects your graphics hardware, picks the best
+backend it can validate, builds `whisper-cli` from source, and symlinks the
+`voice` command to `~/.local/bin`.
 Re-run with `--update` to pull the latest whisper.cpp and rebuild.
+In `--gpu auto` mode, the installer now pulls in Vulkan build/runtime packages
+for AMD and Intel Arc-class systems when that path looks appropriate, and falls
+back to CPU + OpenBLAS if validation fails.
+
+You can also force the backend:
+
+```bash
+bash tools/voice-cli/install.sh --gpu cpu
+bash tools/voice-cli/install.sh --gpu vulkan
+bash tools/voice-cli/install.sh --gpu cuda
+```
+
+`--gpu auto` remains the default. It prefers:
+
+- CUDA for NVIDIA systems when the CUDA toolkit is already usable.
+- Vulkan for AMD and Intel Arc-class systems after validating the Vulkan runtime.
+- CPU + OpenBLAS for integrated Intel systems and unknown hardware.
+
+Explicit modes are strict: they do not silently fall back to another backend if
+prerequisites are missing or configuration fails.
 
 After setup, launch the TUI and press `M` to download a Whisper model, then `R` to record.
 
@@ -230,6 +251,13 @@ Vulkan path, recommended first for AMD GPUs and Steam Deck-class hardware:
 sudo apt install -y libvulkan-dev vulkan-tools glslc
 vulkaninfo
 ```
+
+On Mint, `vulkaninfo` may already work before `libvulkan-dev` and `glslc` are
+installed. That is enough to detect a Vulkan runtime, but not enough to build
+`whisper.cpp` with `GGML_VULKAN=1`.
+If you run `bash tools/voice-cli/install.sh --gpu vulkan`, the installer now
+pulls in those Vulkan packages automatically before building. `--gpu auto` does
+the same when it chooses the Vulkan path.
 
 NVIDIA CUDA path:
 
