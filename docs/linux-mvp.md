@@ -191,8 +191,9 @@ The hotkey backend uses X11 `XGrabKey` through `libX11`, so it does not need
 root access or input-device permissions and does not observe normal typing. The
 TUI shortcut recorder temporarily uses `XGrabKeyboard` only while the app is in
 the `Record Shortcut` state. This is the intended path for Linux Mint Cinnamon
-on X11. Wayland sessions do not permit arbitrary global keyboard grabs; use an
-X11 Cinnamon session or bind a desktop shortcut to a Voice command there.
+on X11. Wayland does not allow arbitrary global keyboard grabs, so the built-in
+hotkey daemon is X11-only. On Wayland, use a compositor or desktop-environment
+shortcut to launch a Voice command instead.
 
 ## Automated Setup
 

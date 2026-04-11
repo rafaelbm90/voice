@@ -134,4 +134,4 @@ On Linux, `llama-completion` is used automatically when it exists beside `llama-
 - This project is intentionally packaged as a SwiftPM macOS app so it can build in environments that only have Xcode Command Line Tools installed.
 - For a distributable `.app` bundle, wrap the package in an Xcode app target and add `NSMicrophoneUsageDescription` to the generated app's `Info.plist`.
 - The current transcription path uses upstream `whisper.cpp` CLI arguments such as `--model`, `--file`, `--output-txt`, `--output-file`, `--no-prints`, and `--no-timestamps`.
-- On Linux, the global hotkey uses X11 `XGrabKey` and does not require root access. Wayland sessions do not support arbitrary global keyboard grabs — use an X11 session or bind a desktop shortcut to a `voice` command instead.
+- On Linux, the built-in global hotkey uses X11 `XGrabKey` and does not require root access. Wayland does not allow arbitrary global keyboard grabs, so on Wayland you should use a compositor or desktop-environment shortcut to launch a `voice` command instead.
