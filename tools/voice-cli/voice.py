@@ -218,7 +218,12 @@ def expand_path(value: str | None) -> Path | None:
 
 
 def default_whisper_threads() -> int:
-    return max(1, min(8, os.cpu_count() or 4))
+    cpu_count = os.cpu_count() or 4
+    if cpu_count <= 2:
+        return 1
+    if cpu_count <= 4:
+        return max(1, cpu_count - 1)
+    return min(6, cpu_count)
 
 
 def default_model_root() -> Path:
@@ -475,7 +480,7 @@ def copy_to_clipboard(text: str) -> str:
             assert process.stdin is not None
             process.stdin.write(text)
             process.stdin.close()
-            time.sleep(0.2)
+            time.sleep(0.05)
         except OSError as exc:
             raise VoiceCliError(f"Clipboard copy failed using {name}: {exc}") from exc
 
@@ -542,7 +547,7 @@ def ensure_paste_focus(command: Sequence[str]) -> None:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=1,
+            timeout=0.2,
             check=False,
             env=tool_environment(command),
         )
@@ -589,7 +594,7 @@ def _detect_paste_key_x11(xdotool: str) -> str:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=1,
+            timeout=0.2,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -2791,7 +2796,7 @@ def add_whisper_decode_args(parser: argparse.ArgumentParser) -> None:
         "--whisper-threads",
         type=int,
         default=default_whisper_threads(),
-        help="whisper.cpp compute threads. Defaults to min(8, CPU count).",
+        help="whisper.cpp compute threads. Defaults to a conservative CPU-count-based value for lower latency on slower machines.",
     )
     parser.add_argument(
         "--whisper-beam-size",
@@ -2856,7 +2861,7 @@ def add_paste_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--paste-delay-ms",
         type=int,
-        default=120,
+        default=40,
         help="Delay before sending the paste shortcut, in milliseconds.",
     )
     parser.add_argument(
