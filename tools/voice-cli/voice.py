@@ -422,6 +422,47 @@ def resolve_language(configured: str | None) -> str:
     return configured if configured else load_language()
 
 
+def load_auto_paste() -> bool:
+    value = read_voice_config().get("auto_paste")
+    return value if isinstance(value, bool) else True
+
+
+def save_auto_paste(enabled: bool) -> None:
+    config = read_voice_config()
+    config["auto_paste"] = enabled
+    write_voice_config(config)
+
+
+def resolve_auto_paste(configured: bool | None) -> bool:
+    return load_auto_paste() if configured is None else configured
+
+
+def load_fast_mode() -> bool:
+    value = read_voice_config().get("fast_mode")
+    return value if isinstance(value, bool) else False
+
+
+def save_fast_mode(enabled: bool) -> None:
+    config = read_voice_config()
+    config["fast_mode"] = enabled
+    write_voice_config(config)
+
+
+def resolve_fast_mode(configured: bool | None) -> bool:
+    return load_fast_mode() if configured is None else configured
+
+
+def apply_runtime_settings(args: argparse.Namespace) -> None:
+    args.auto_paste = resolve_auto_paste(getattr(args, "auto_paste", None))
+    args.fast_mode = resolve_fast_mode(getattr(args, "fast_mode", None))
+    args.base_refine = getattr(args, "base_refine", getattr(args, "refine", None))
+
+    # Fast mode should not override an explicit llama choice, but it should
+    # remove the default heuristic cleanup pass from the latency-critical path.
+    if args.fast_mode and getattr(args, "refine", None) == "heuristic":
+        args.refine = "none"
+
+
 def resolve_whisper_model(configured: str | None) -> Path:
     if configured:
         return require_file(configured, "Whisper model")
@@ -1567,6 +1608,7 @@ def command_refine(args: argparse.Namespace) -> int:
 
 
 def command_run(args: argparse.Namespace) -> int:
+    apply_runtime_settings(args)
     whisper_model = resolve_whisper_model(args.whisper_model)
     whisper_cli = resolve_executable(args.whisper_cli, ("whisper-cli",))
     args.language = resolve_language(args.language)
@@ -1706,7 +1748,7 @@ class TuiView:
         self.add_text(3, 0, f"Global hotkey: {self.hotkey or 'disabled'}")
         self.add_text(4, 0, f"Active Whisper model: {self.model_state.active_label()}")
         self.add_text(5, 0, f"Language: {language_label(self.language)}")
-        self.add_text(6, 0, "Controls: R record | M models | L language | H shortcut | Q quit")
+        self.add_text(6, 0, "Controls: R record | M models | L language | S settings | H shortcut | Q quit")
 
         model_top = 8
         model_height = 8
@@ -2004,6 +2046,78 @@ def run_language_manager(view: TuiView, args: argparse.Namespace) -> None:
             return
 
 
+def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
+    screen = view.screen
+    selected = 0
+    view.flush_input()
+
+    def items() -> list[tuple[str, str]]:
+        return [
+            ("Auto-paste", "On" if args.auto_paste else "Off"),
+            ("Fast mode", "On" if args.fast_mode else "Off"),
+        ]
+
+    while True:
+        height, width = screen.getmaxyx()
+        screen.erase()
+        if height < 16 or width < 54:
+            view.add_text(0, 0, "Settings needs at least 54x16.", curses.A_BOLD)
+            screen.refresh()
+            time.sleep(0.1)
+            key = screen.getch()
+            if key in (ord("q"), ord("Q"), 27):
+                return
+            continue
+
+        view.add_text(0, 0, "Voice Settings", curses.A_BOLD)
+        view.add_text(1, 0, "Controls: Up/Down select | Enter/Space toggle | Q close")
+
+        current_items = items()
+        for index, (label, value) in enumerate(current_items):
+            marker = ">" if index == selected else " "
+            attr = curses.A_REVERSE if index == selected else 0
+            view.add_text(3 + index, 0, f"{marker} {label:12} {value}", attr)
+
+        detail_lines = [
+            "Auto-paste pastes the final text after it reaches the clipboard.",
+            "Fast mode skips the default heuristic refinement step to reduce latency.",
+            "An explicit --refine llama still uses llama refinement.",
+        ]
+        for offset, line in enumerate(detail_lines, start=7):
+            view.add_text(offset, 0, line)
+
+        screen.refresh()
+        key = screen.getch()
+        if key == -1:
+            time.sleep(0.1)
+            continue
+        if key in (ord("q"), ord("Q"), 27):
+            view.flush_input()
+            view.draw()
+            return
+        if key in (curses.KEY_UP, ord("k"), ord("K")):
+            selected = (selected - 1) % len(current_items)
+            continue
+        if key in (curses.KEY_DOWN, ord("j"), ord("J")):
+            selected = (selected + 1) % len(current_items)
+            continue
+        if key not in (ord("\n"), curses.KEY_ENTER, ord(" "), ord("t"), ord("T")):
+            continue
+
+        if selected == 0:
+            args.auto_paste = not args.auto_paste
+            save_auto_paste(args.auto_paste)
+            view.add_log(f"Auto-paste {'enabled' if args.auto_paste else 'disabled'}.")
+        elif selected == 1:
+            args.fast_mode = not args.fast_mode
+            save_fast_mode(args.fast_mode)
+            if args.fast_mode and args.refine == "heuristic":
+                args.refine = "none"
+            elif not args.fast_mode and getattr(args, "base_refine", None) is not None:
+                args.refine = args.base_refine
+            view.add_log(f"Fast mode {'enabled' if args.fast_mode else 'disabled'}.")
+
+
 def tui_worker(
     view: TuiView,
     phase: str,
@@ -2253,6 +2367,8 @@ def run_tui_screen(
                 run_model_manager(view, model_state)
             if key in (ord("l"), ord("L")):
                 run_language_manager(view, args)
+            if key in (ord("s"), ord("S")):
+                run_settings_manager(view, args)
             if key in (ord("h"), ord("H")):
                 if hotkey_manager:
                     hotkey_manager.stop()
@@ -2289,6 +2405,7 @@ def command_tui(args: argparse.Namespace) -> int:
     if (args.auto_run or args.once) and args.seconds <= 0:
         raise VoiceCliError("--seconds must be greater than zero.")
 
+    apply_runtime_settings(args)
     args.hotkey = resolve_hotkey(args.hotkey)
     args.language = resolve_language(args.language)
     model_state = initial_tui_model_state(args.whisper_model)
@@ -2696,6 +2813,7 @@ def run_finished_audio_pipeline(
 
 def command_hotkey(args: argparse.Namespace) -> int:
     require_x11_session()
+    apply_runtime_settings(args)
     args.hotkey = resolve_hotkey(args.hotkey)
     args.language = resolve_language(args.language)
     whisper_model = resolve_whisper_model(args.whisper_model)
@@ -2855,7 +2973,7 @@ def add_paste_args(parser: argparse.ArgumentParser) -> None:
         "--auto-paste",
         dest="auto_paste",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Paste the final clipboard text into the focused window after transcription.",
     )
     parser.add_argument(
@@ -2875,6 +2993,15 @@ def add_paste_args(parser: argparse.ArgumentParser) -> None:
         choices=("auto", "ctrl+v", "ctrl+shift+v", "shift+insert"),
         default="auto",
         help="Key combo used to paste. auto detects terminal vs GUI via WM_CLASS on X11 (ctrl+shift+v fallback).",
+    )
+
+
+def add_runtime_mode_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--fast-mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip the default heuristic refinement pass to reduce latency on slower machines.",
     )
 
 
@@ -2936,6 +3063,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--llama-cli")
     run.add_argument("--profile", choices=("literal", "balanced", "polished"), default="balanced")
     run.add_argument("--llama-timeout", type=float, default=LLAMA_TIMEOUT_SECONDS)
+    add_runtime_mode_args(run)
     add_common_audio_args(run)
     add_audio_processing_args(run)
     add_paste_args(run)
@@ -2952,6 +3080,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument("--llama-cli")
     tui.add_argument("--profile", choices=("literal", "balanced", "polished"), default="balanced")
     tui.add_argument("--llama-timeout", type=float, default=LLAMA_TIMEOUT_SECONDS)
+    add_runtime_mode_args(tui)
     tui.add_argument("--backend", choices=("auto", "pw-record", "arecord", "ffmpeg"), default="auto")
     tui.add_argument("--seconds", type=float, default=5.0, help="Recording duration for --auto-run or --once.")
     tui.add_argument("--auto-run", action="store_true", help="Start with a timed recording immediately.")
@@ -2975,6 +3104,7 @@ def build_parser() -> argparse.ArgumentParser:
     hotkey.add_argument("--llama-cli")
     hotkey.add_argument("--profile", choices=("literal", "balanced", "polished"), default="balanced")
     hotkey.add_argument("--llama-timeout", type=float, default=LLAMA_TIMEOUT_SECONDS)
+    add_runtime_mode_args(hotkey)
     hotkey.add_argument("--backend", choices=("auto", "pw-record", "arecord", "ffmpeg"), default="auto")
     add_audio_processing_args(hotkey)
     add_paste_args(hotkey)
