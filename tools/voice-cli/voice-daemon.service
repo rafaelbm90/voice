@@ -1,0 +1,14 @@
+[Unit]
+Description=Voice dictation daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/voice daemon
+Restart=on-failure
+RestartSec=2
+EnvironmentFile=-%h/.config/voice/daemon.env
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Voice
+Comment=Local dictation pipeline for Linux and macOS
+Exec=voice
+TryExec=voice
+Terminal=true
+NoDisplay=true
+Categories=Utility;AudioVideo;
+Keywords=dictation;voice;speech;transcription;
+StartupNotify=false
