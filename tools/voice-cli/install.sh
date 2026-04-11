@@ -31,6 +31,8 @@ VOICE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voice"
 WHISPER_SRC_DIR="${VOICE_DATA_DIR}/src/whisper.cpp"
 WHISPER_BUILD_DIR="${WHISPER_SRC_DIR}/build"
 WHISPER_BIN="${WHISPER_BUILD_DIR}/bin/whisper-cli"
+WHISPER_BUILD_FLAGS_FILE="${WHISPER_BUILD_DIR}/.voice-cmake-flags"
+WHISPER_CMAKE_CACHE_FILE="${WHISPER_BUILD_DIR}/CMakeCache.txt"
 LOCAL_BIN="${HOME}/.local/bin"
 VOICE_WRAPPER="${REPO_ROOT}/tools/voice-cli/voice"
 WHISPER_REPO="https://github.com/ggerganov/whisper.cpp.git"
@@ -224,6 +226,22 @@ build_whisper_cpp() {
     git -C "${WHISPER_SRC_DIR}" pull --ff-only
   fi
 
+  if [[ -f "${WHISPER_CMAKE_CACHE_FILE}" ]] && [[ "${CMAKE_GPU_FLAGS}" != *"GGML_CUDA=ON"* ]]; then
+    if grep -q "GGML_CUDA:.*=ON" "${WHISPER_CMAKE_CACHE_FILE}"; then
+      warn "Found stale CUDA config in cached CMake state. Clearing build directory."
+      rm -rf "${WHISPER_BUILD_DIR}"
+    fi
+  fi
+
+  if [[ -f "${WHISPER_BUILD_FLAGS_FILE}" ]]; then
+    local previous_flags
+    previous_flags="$(<"${WHISPER_BUILD_FLAGS_FILE}")"
+    if [[ "${previous_flags}" != "${CMAKE_GPU_FLAGS}" ]]; then
+      warn "Build backend changed since last run. Clearing cached CMake build directory."
+      rm -rf "${WHISPER_BUILD_DIR}"
+    fi
+  fi
+
   # Configure
   step "Configuring whisper.cpp (${GPU_LABEL})..."
   # shellcheck disable=SC2086
@@ -232,6 +250,8 @@ build_whisper_cpp() {
         -DCMAKE_BUILD_TYPE=Release \
         ${CMAKE_GPU_FLAGS} \
         -S "${WHISPER_SRC_DIR}"
+
+  printf '%s' "${CMAKE_GPU_FLAGS}" > "${WHISPER_BUILD_FLAGS_FILE}"
 
   # Build only the whisper-cli target to avoid building tests and extras
   step "Building whisper-cli (this takes a few minutes)..."
