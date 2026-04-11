@@ -45,10 +45,13 @@ X11_LOCK_MASK = 1 << 1
 X11_CONTROL_MASK = 1 << 2
 X11_MOD1_MASK = 1 << 3
 X11_MOD2_MASK = 1 << 4
+X11_MOD3_MASK = 1 << 5
 X11_MOD4_MASK = 1 << 6
+X11_MOD5_MASK = 1 << 7
 X11_GRAB_MODE_ASYNC = 1
 X11_CURRENT_TIME = 0
 X11_GRAB_SUCCESS = 0
+X11_BAD_ACCESS = 10
 
 
 class VoiceCliError(RuntimeError):
@@ -160,6 +163,18 @@ class XKeyEvent(ctypes.Structure):
         ("state", ctypes.c_uint),
         ("keycode", ctypes.c_uint),
         ("same_screen", ctypes.c_int),
+    ]
+
+
+class XErrorEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("display", ctypes.c_void_p),
+        ("resourceid", ctypes.c_ulong),
+        ("serial", ctypes.c_ulong),
+        ("error_code", ctypes.c_ubyte),
+        ("request_code", ctypes.c_ubyte),
+        ("minor_code", ctypes.c_ubyte),
     ]
 
 
@@ -2302,6 +2317,7 @@ class X11GlobalHotkey:
         self.root = self.lib.XDefaultRootWindow(self.display)
         self.hotkey = hotkey
         self.binding = self.parse_hotkey(hotkey)
+        self._x_error_handler: ctypes._CFuncPtr | None = None
 
     def configure_xlib(self) -> None:
         self.lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
@@ -2347,6 +2363,7 @@ class X11GlobalHotkey:
         self.lib.XSync.restype = ctypes.c_int
         self.lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
         self.lib.XCloseDisplay.restype = ctypes.c_int
+        self.lib.XSetErrorHandler.restype = ctypes.c_void_p
 
     def parse_hotkey(self, hotkey: str) -> HotkeyBinding:
         parts = [part.strip() for part in re.split(r"[+,-]", hotkey) if part.strip()]
@@ -2410,34 +2427,51 @@ class X11GlobalHotkey:
         return key[:1].upper() + key[1:]
 
     def grab(self) -> None:
-        variants = [
-            0,
-            X11_LOCK_MASK,
-            X11_MOD2_MASK,
-            X11_LOCK_MASK | X11_MOD2_MASK,
-        ]
-        for variant in variants:
-            self.lib.XGrabKey(
-                self.display,
-                self.binding.keycode,
-                self.binding.modifiers | variant,
-                self.root,
-                0,
-                X11_GRAB_MODE_ASYNC,
-                X11_GRAB_MODE_ASYNC,
+        error_code: int | None = None
+
+        @ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(XErrorEvent))
+        def error_handler(_display: ctypes.c_void_p, event: ctypes.POINTER(XErrorEvent)) -> int:
+            nonlocal error_code
+            error_code = int(event.contents.error_code)
+            return 0
+
+        self._x_error_handler = error_handler
+        previous_handler = self.lib.XSetErrorHandler(self._x_error_handler)
+        try:
+            for variant in self.ignored_modifier_variants():
+                self.lib.XGrabKey(
+                    self.display,
+                    self.binding.keycode,
+                    self.binding.modifiers | variant,
+                    self.root,
+                    0,
+                    X11_GRAB_MODE_ASYNC,
+                    X11_GRAB_MODE_ASYNC,
+                )
+            self.lib.XSync(self.display, 0)
+        finally:
+            self.lib.XSetErrorHandler(previous_handler)
+            self._x_error_handler = None
+
+        if error_code == X11_BAD_ACCESS:
+            raise VoiceCliError(
+                f"Could not grab global hotkey {self.hotkey}. "
+                "Another app or desktop binding is already using it."
             )
-        self.lib.XSync(self.display, 0)
+        if error_code is not None:
+            raise VoiceCliError(f"X11 rejected the global hotkey {self.hotkey} (error {error_code}).")
 
     def ungrab(self) -> None:
-        variants = [
-            0,
-            X11_LOCK_MASK,
-            X11_MOD2_MASK,
-            X11_LOCK_MASK | X11_MOD2_MASK,
-        ]
-        for variant in variants:
+        for variant in self.ignored_modifier_variants():
             self.lib.XUngrabKey(self.display, self.binding.keycode, self.binding.modifiers | variant, self.root)
         self.lib.XSync(self.display, 0)
+
+    @staticmethod
+    def ignored_modifier_variants() -> tuple[int, ...]:
+        variants = [0]
+        for mask in (X11_LOCK_MASK, X11_MOD2_MASK, X11_MOD3_MASK, X11_MOD5_MASK):
+            variants.extend(existing | mask for existing in tuple(variants))
+        return tuple(dict.fromkeys(variants))
 
     def capture_next_hotkey(self, stop_event: threading.Event | None = None) -> str:
         result = self.lib.XGrabKeyboard(
@@ -2497,8 +2531,14 @@ class X11GlobalHotkey:
 
         return "+".join([*modifiers, key_name])
 
-    def listen(self, callback: Callable[[], None], stop_event: threading.Event | None = None) -> None:
-        self.grab()
+    def listen(
+        self,
+        callback: Callable[[], None],
+        stop_event: threading.Event | None = None,
+        already_grabbed: bool = False,
+    ) -> None:
+        if not already_grabbed:
+            self.grab()
         event = ctypes.create_string_buffer(192)
         last_trigger = 0.0
         try:
@@ -2532,13 +2572,24 @@ class X11HotkeyManager:
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:
+        ready_event = threading.Event()
+        startup_error: list[BaseException] = []
+
         with self.lock:
             if self.thread and self.thread.is_alive():
                 return
 
             self.stop_event = threading.Event()
-            self.thread = threading.Thread(target=self.run_listener, args=(self.hotkey, self.stop_event), daemon=True)
+            self.thread = threading.Thread(
+                target=self.run_listener,
+                args=(self.hotkey, self.stop_event, ready_event, startup_error),
+                daemon=True,
+            )
             self.thread.start()
+
+        ready_event.wait(timeout=1.5)
+        if startup_error:
+            raise VoiceCliError(str(startup_error[0]))
 
     def stop(self) -> None:
         with self.lock:
@@ -2557,10 +2608,21 @@ class X11HotkeyManager:
         self.hotkey = hotkey
         self.start()
 
-    def run_listener(self, hotkey: str, stop_event: threading.Event) -> None:
+    def run_listener(
+        self,
+        hotkey: str,
+        stop_event: threading.Event,
+        ready_event: threading.Event,
+        startup_error: list[BaseException],
+    ) -> None:
         try:
-            X11GlobalHotkey(hotkey).listen(self.callback, stop_event)
+            listener = X11GlobalHotkey(hotkey)
+            listener.grab()
+            ready_event.set()
+            listener.listen(self.callback, stop_event, already_grabbed=True)
         except BaseException as exc:
+            startup_error.append(exc)
+            ready_event.set()
             print(f"Voice: global hotkey listener stopped: {exc}", file=sys.stderr, flush=True)
 
 
