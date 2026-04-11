@@ -59,10 +59,16 @@ Then build and run:
 
 ```bash
 swift build
-swift run
+./voice
 ```
 
-`swift run` launches a menu-bar app, so the terminal stays attached while the app is running. Quit from the menu bar or press `Ctrl+C` in the terminal.
+`./voice` launches the SwiftPM menu-bar app and keeps the terminal attached while it is running. Quit from the menu bar or press `Ctrl+C` in the terminal.
+
+To make `voice` available directly in your shell, symlink the launcher into a directory on your `PATH`:
+
+```bash
+ln -sfn "$PWD/voice" ~/.local/bin/voice
+```
 
 ### Linux
 
@@ -83,7 +89,7 @@ See `docs/linux-mvp.md` for GPU options, manual steps, and troubleshooting.
 
 ### macOS
 
-1. Launch the app with `swift run`.
+1. Launch the app with `voice` or `./voice`.
 2. Open the menu bar item and then open `Settings`.
 3. Grant Microphone and Accessibility access.
 4. Resolve `whisper-cli` from Settings if needed.
