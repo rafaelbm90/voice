@@ -217,13 +217,42 @@ def expand_path(value: str | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _physical_core_count() -> int | None:
+    """Read physical core count from /proc/cpuinfo (Linux only).
+
+    Returns None if the file is unavailable or unparseable.
+    Using physical cores avoids the hyperthreading penalty where whisper.cpp
+    throughput peaks at physical-core count, not logical-core count.
+    """
+    try:
+        text = Path("/proc/cpuinfo").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    # Each physical CPU package reports "cpu cores : N". Sum across all sockets.
+    socket_cores: dict[str, int] = {}
+    current_id: str | None = None
+    for line in text.splitlines():
+        if line.startswith("physical id"):
+            current_id = line.split(":", 1)[1].strip()
+        elif line.startswith("cpu cores") and current_id is not None:
+            try:
+                socket_cores[current_id] = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+            current_id = None
+    if socket_cores:
+        return sum(socket_cores.values())
+    return None
+
+
 def default_whisper_threads() -> int:
-    cpu_count = os.cpu_count() or 4
-    if cpu_count <= 2:
-        return 1
-    if cpu_count <= 4:
-        return max(1, cpu_count - 1)
-    return min(6, cpu_count)
+    physical = _physical_core_count()
+    core_count = physical if physical is not None else (os.cpu_count() or 4)
+    if core_count <= 2:
+        return core_count
+    if core_count <= 4:
+        return max(1, core_count - 1)
+    return min(6, core_count)
 
 
 def default_model_root() -> Path:
@@ -452,15 +481,61 @@ def resolve_fast_mode(configured: bool | None) -> bool:
     return load_fast_mode() if configured is None else configured
 
 
+def load_trim_silence() -> bool:
+    value = read_voice_config().get("trim_silence")
+    return value if isinstance(value, bool) else False
+
+
+def save_trim_silence(enabled: bool) -> None:
+    config = read_voice_config()
+    config["trim_silence"] = enabled
+    write_voice_config(config)
+
+
+def resolve_trim_silence(configured: bool | None) -> bool:
+    return load_trim_silence() if configured is None else configured
+
+
+def load_whisper_threads() -> int | None:
+    value = read_voice_config().get("whisper_threads")
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def save_whisper_threads(threads: int) -> None:
+    config = read_voice_config()
+    config["whisper_threads"] = threads
+    write_voice_config(config)
+
+
+def resolve_whisper_threads(configured: int | None) -> int:
+    saved = load_whisper_threads()
+    if configured is not None:
+        return configured
+    if saved is not None:
+        return saved
+    return default_whisper_threads()
+
+
 def apply_runtime_settings(args: argparse.Namespace) -> None:
     args.auto_paste = resolve_auto_paste(getattr(args, "auto_paste", None))
     args.fast_mode = resolve_fast_mode(getattr(args, "fast_mode", None))
+    # Capture whether trim_silence was explicitly set (True/False) or left unspecified (None).
+    # fast_mode auto-enables trim only when the user has not expressed an explicit preference.
+    _explicit_trim = getattr(args, "trim_silence", None)
+    args.trim_silence = resolve_trim_silence(_explicit_trim)
+    args.whisper_threads = resolve_whisper_threads(getattr(args, "whisper_threads", None))
     args.base_refine = getattr(args, "base_refine", getattr(args, "refine", None))
 
     # Fast mode should not override an explicit llama choice, but it should
     # remove the default heuristic cleanup pass from the latency-critical path.
     if args.fast_mode and getattr(args, "refine", None) == "heuristic":
         args.refine = "none"
+
+    # Fast mode also enables silence trimming, but only when trim_silence has no
+    # explicit preference: neither a CLI flag nor a saved config value. This
+    # preserves deliberate user overrides (--no-trim-silence or saved Off in Settings).
+    if args.fast_mode and _explicit_trim is None and "trim_silence" not in read_voice_config():
+        args.trim_silence = True
 
 
 def resolve_whisper_model(configured: str | None) -> Path:
@@ -980,10 +1055,15 @@ def prepare_audio_for_transcription(
     if not ffmpeg:
         return audio_path, "Silence trim skipped: ffmpeg not found."
 
+    # Skip trim on very short clips — ffmpeg subprocess overhead (~200–300 ms)
+    # exceeds the benefit when there is little silence to remove.
+    original_duration = audio_duration_seconds(audio_path)
+    if original_duration is not None and original_duration < 1.5:
+        return audio_path, f"Silence trim skipped: audio too short ({original_duration:0.1f}s)."
+
     threshold = getattr(args, "trim_silence_threshold", "-45dB")
     silence_seconds = max(0, getattr(args, "trim_silence_ms", 250)) / 1000
     min_speech_seconds = max(0.0, getattr(args, "min_speech_seconds", 0.25))
-    original_duration = audio_duration_seconds(audio_path)
     trim_dir = work_dir or audio_path.parent
     trimmed_path = trim_dir / f"{audio_path.stem}-trimmed.wav"
     filter_expr = (
@@ -2913,8 +2993,8 @@ def add_whisper_decode_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--whisper-threads",
         type=int,
-        default=default_whisper_threads(),
-        help="whisper.cpp compute threads. Defaults to a conservative CPU-count-based value for lower latency on slower machines.",
+        default=None,
+        help="whisper.cpp compute threads. Reads saved setting when omitted; falls back to physical-core-based default.",
     )
     parser.add_argument(
         "--whisper-beam-size",
@@ -2946,8 +3026,8 @@ def add_audio_processing_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--trim-silence",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Trim leading and trailing silence with ffmpeg before transcription.",
+        default=None,
+        help="Trim leading and trailing silence with ffmpeg before transcription. Reads saved setting when omitted.",
     )
     parser.add_argument(
         "--trim-silence-ms",
