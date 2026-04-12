@@ -1754,14 +1754,26 @@ def command_run(args: argparse.Namespace) -> int:
     return 0
 
 
+# Models that are slow on CPU-only hardware. Users on slow devices should use tiny or base.
+_SLOW_CPU_MODELS = {"medium", "large-v3-turbo", "large-v3"}
+
+
 class TuiView:
-    def __init__(self, screen: curses.window, model_state: TuiModelState, language: str, hotkey: str = "") -> None:
+    def __init__(
+        self,
+        screen: curses.window,
+        model_state: TuiModelState,
+        language: str,
+        hotkey: str = "",
+        gpu_backend: str = "",
+    ) -> None:
         self.screen = screen
         self.phase = "Ready"
         self.detail = "Idle"
         self.hotkey = hotkey
         self.model_state = model_state
         self.language = language
+        self.gpu_backend = gpu_backend
         self.logs: list[str] = []
         self.output = ""
         self.spinner_frame = 0
@@ -1817,8 +1829,8 @@ class TuiView:
         height, width = self.screen.getmaxyx()
         self.screen.erase()
 
-        if height < 18 or width < 60:
-            self.add_text(0, 0, "Voice TUI needs at least 60x18.", curses.A_BOLD)
+        if height < 19 or width < 60:
+            self.add_text(0, 0, "Voice TUI needs at least 60x19.", curses.A_BOLD)
             self.screen.refresh()
             return
 
@@ -1830,7 +1842,16 @@ class TuiView:
         self.add_text(5, 0, f"Language: {language_label(self.language)}")
         self.add_text(6, 0, "Controls: R record | M models | L language | S settings | H shortcut | Q quit")
 
-        model_top = 8
+        active_key = self.model_state.active.key if self.model_state.active else ""
+        cpu_only = self.gpu_backend in ("CPU-only", "unknown", "")
+        if active_key in _SLOW_CPU_MODELS and cpu_only:
+            self.add_text(
+                7, 0,
+                f"[slow CPU model: {self.model_state.active_label()} — consider Tiny or Base for faster transcription]",
+                curses.A_BOLD,
+            )
+
+        model_top = 9
         model_height = 8
         log_top = model_top + model_height + 1
         log_height = max(4, height // 5)
@@ -2126,22 +2147,48 @@ def run_language_manager(view: TuiView, args: argparse.Namespace) -> None:
             return
 
 
+_SETTINGS_DETAILS: dict[str, list[str]] = {
+    "Auto-paste": [
+        "Pastes the final text into the focused window after transcription.",
+        "Uses xdotool (X11) or wtype (Wayland) to send Ctrl+V.",
+    ],
+    "Fast mode": [
+        "Recommended for slow devices. Enables silence trim and skips",
+        "the heuristic cleanup pass to cut post-record latency.",
+        "An explicit --refine llama still uses LLM refinement.",
+    ],
+    "Trim silence": [
+        "Strips leading/trailing silence with ffmpeg before transcription.",
+        "Reduces whisper-cli work on recordings with long pauses.",
+        "Skipped automatically for clips shorter than 1.5 s.",
+    ],
+    "Threads": [
+        "CPU threads used by whisper-cli. Lower = less thermal load;",
+        "higher = faster transcription up to physical core count.",
+        "Left/Right to adjust. Saved to config.",
+    ],
+}
+
+
 def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
     screen = view.screen
     selected = 0
+    max_threads = os.cpu_count() or 8
     view.flush_input()
 
     def items() -> list[tuple[str, str]]:
         return [
             ("Auto-paste", "On" if args.auto_paste else "Off"),
             ("Fast mode", "On" if args.fast_mode else "Off"),
+            ("Trim silence", "On" if args.trim_silence else "Off"),
+            ("Threads", str(args.whisper_threads)),
         ]
 
     while True:
         height, width = screen.getmaxyx()
         screen.erase()
-        if height < 16 or width < 54:
-            view.add_text(0, 0, "Settings needs at least 54x16.", curses.A_BOLD)
+        if height < 18 or width < 54:
+            view.add_text(0, 0, "Settings needs at least 54x18.", curses.A_BOLD)
             screen.refresh()
             time.sleep(0.1)
             key = screen.getch()
@@ -2150,20 +2197,17 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
             continue
 
         view.add_text(0, 0, "Voice Settings", curses.A_BOLD)
-        view.add_text(1, 0, "Controls: Up/Down select | Enter/Space toggle | Q close")
+        view.add_text(1, 0, "Controls: Up/Down select | Enter/Space toggle | Left/Right adjust | Q close")
 
         current_items = items()
         for index, (label, value) in enumerate(current_items):
             marker = ">" if index == selected else " "
             attr = curses.A_REVERSE if index == selected else 0
-            view.add_text(3 + index, 0, f"{marker} {label:12} {value}", attr)
+            view.add_text(3 + index, 0, f"{marker} {label:14} {value}", attr)
 
-        detail_lines = [
-            "Auto-paste pastes the final text after it reaches the clipboard.",
-            "Fast mode skips the default heuristic refinement step to reduce latency.",
-            "An explicit --refine llama still uses llama refinement.",
-        ]
-        for offset, line in enumerate(detail_lines, start=7):
+        selected_label = current_items[selected][0]
+        detail_lines = _SETTINGS_DETAILS.get(selected_label, [])
+        for offset, line in enumerate(detail_lines, start=9):
             view.add_text(offset, 0, line)
 
         screen.refresh()
@@ -2181,6 +2225,19 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
         if key in (curses.KEY_DOWN, ord("j"), ord("J")):
             selected = (selected + 1) % len(current_items)
             continue
+
+        # Threads stepper: Left/Right arrows or -/+
+        if selected == 3:
+            if key in (curses.KEY_LEFT, ord("-")):
+                args.whisper_threads = max(1, args.whisper_threads - 1)
+                save_whisper_threads(args.whisper_threads)
+                view.add_log(f"Threads set to {args.whisper_threads}.")
+            elif key in (curses.KEY_RIGHT, ord("+")):
+                args.whisper_threads = min(max_threads, args.whisper_threads + 1)
+                save_whisper_threads(args.whisper_threads)
+                view.add_log(f"Threads set to {args.whisper_threads}.")
+            continue
+
         if key not in (ord("\n"), curses.KEY_ENTER, ord(" "), ord("t"), ord("T")):
             continue
 
@@ -2195,7 +2252,14 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
                 args.refine = "none"
             elif not args.fast_mode and getattr(args, "base_refine", None) is not None:
                 args.refine = args.base_refine
+            if args.fast_mode and not args.trim_silence:
+                args.trim_silence = True
+                save_trim_silence(True)
             view.add_log(f"Fast mode {'enabled' if args.fast_mode else 'disabled'}.")
+        elif selected == 2:
+            args.trim_silence = not args.trim_silence
+            save_trim_silence(args.trim_silence)
+            view.add_log(f"Trim silence {'enabled' if args.trim_silence else 'disabled'}.")
 
 
 def tui_worker(
@@ -2386,7 +2450,8 @@ def run_tui_screen(
     llama_model: Path | None,
     llama_cli: Path | None,
 ) -> str | None:
-    view = TuiView(screen, model_state, args.language, args.hotkey)
+    gpu_backend = whisper_backend_summary(whisper_cli)
+    view = TuiView(screen, model_state, args.language, args.hotkey, gpu_backend=gpu_backend)
     final_text: str | None = None
     should_run = args.auto_run or args.once
     hotkey_event = threading.Event()
