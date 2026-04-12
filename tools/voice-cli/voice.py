@@ -26,8 +26,21 @@ import urllib.error
 import urllib.request
 import wave
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Iterable, Sequence, TypeVar
+from typing import Any, Callable, Iterable, Sequence, TypeVar
+
+try:
+    import gi
+
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+
+    HAVE_GIO = True
+except (ImportError, ValueError):
+    Gio = None
+    GLib = None
+    HAVE_GIO = False
 
 
 SAMPLE_RATE = 16_000
@@ -40,6 +53,14 @@ WHISPER_REPO_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/ma
 VOICE_CONFIG_VERSION = 1
 DEFAULT_HOTKEY = "Ctrl+Alt+space"
 DEFAULT_LANGUAGE = "en"
+PORTAL_BUS_NAME = "org.freedesktop.portal.Desktop"
+PORTAL_DESKTOP_PATH = "/org/freedesktop/portal/desktop"
+PORTAL_REQUEST_INTERFACE = "org.freedesktop.portal.Request"
+PORTAL_SESSION_INTERFACE = "org.freedesktop.portal.Session"
+PORTAL_REMOTE_DESKTOP_INTERFACE = "org.freedesktop.portal.RemoteDesktop"
+PORTAL_REQUEST_TIMEOUT_MS = 120_000
+PORTAL_DEVICE_KEYBOARD = 1
+WAYLAND_PORTAL_BACKEND = "portal"
 
 X11_KEY_PRESS = 2
 X11_SHIFT_MASK = 1 << 0
@@ -466,6 +487,62 @@ def wayland_session_active() -> bool:
     return session_type == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
+def unpack_dbus_value(value: object) -> object:
+    if HAVE_GIO and isinstance(value, GLib.Variant):
+        return unpack_dbus_value(value.unpack())
+    if isinstance(value, dict):
+        return {str(key): unpack_dbus_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [unpack_dbus_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(unpack_dbus_value(item) for item in value)
+    return value
+
+
+def _portal_property(interface_name: str, property_name: str) -> object | None:
+    if not HAVE_GIO:
+        return None
+
+    assert Gio is not None
+    assert GLib is not None
+
+    try:
+        connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        reply = connection.call_sync(
+            PORTAL_BUS_NAME,
+            PORTAL_DESKTOP_PATH,
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            GLib.Variant("(ss)", (interface_name, property_name)),
+            None,
+            Gio.DBusCallFlags.NONE,
+            1000,
+            None,
+        )
+    except Exception:
+        return None
+
+    return unpack_dbus_value(reply.unpack()[0])
+
+
+@lru_cache(maxsize=1)
+def portal_remote_desktop_version() -> int | None:
+    value = _portal_property(PORTAL_REMOTE_DESKTOP_INTERFACE, "version")
+    return value if isinstance(value, int) else None
+
+
+@lru_cache(maxsize=1)
+def portal_remote_desktop_available_device_types() -> int | None:
+    value = _portal_property(PORTAL_REMOTE_DESKTOP_INTERFACE, "AvailableDeviceTypes")
+    return value if isinstance(value, int) else None
+
+
+def portal_remote_desktop_available() -> bool:
+    version = portal_remote_desktop_version()
+    devices = portal_remote_desktop_available_device_types()
+    return isinstance(version, int) and version >= 2 and isinstance(devices, int) and bool(devices & PORTAL_DEVICE_KEYBOARD)
+
+
 def load_auto_paste() -> bool:
     value = read_voice_config().get("auto_paste")
     if isinstance(value, bool):
@@ -481,6 +558,60 @@ def save_auto_paste(enabled: bool) -> None:
 
 def resolve_auto_paste(configured: bool | None) -> bool:
     return load_auto_paste() if configured is None else configured
+
+
+def load_wayland_paste_backend() -> str | None:
+    value = read_voice_config().get("wayland_paste_backend")
+    if value in {WAYLAND_PORTAL_BACKEND, "wtype"}:
+        return str(value)
+    return None
+
+
+def save_wayland_paste_backend(backend: str | None) -> None:
+    config = read_voice_config()
+    if backend is None:
+        config.pop("wayland_paste_backend", None)
+    else:
+        config["wayland_paste_backend"] = backend
+    write_voice_config(config)
+
+
+def load_wayland_portal_restore_token() -> str | None:
+    value = read_voice_config().get("wayland_portal_restore_token")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def save_wayland_portal_restore_token(token: str | None) -> None:
+    config = read_voice_config()
+    if token:
+        config["wayland_portal_restore_token"] = token
+    else:
+        config.pop("wayland_portal_restore_token", None)
+    write_voice_config(config)
+
+
+def clear_wayland_portal_state() -> None:
+    config = read_voice_config()
+    config.pop("wayland_paste_backend", None)
+    config.pop("wayland_portal_restore_token", None)
+    write_voice_config(config)
+
+
+def current_wayland_paste_backend_label() -> str:
+    backend = load_wayland_paste_backend()
+    if backend:
+        return backend
+    return "auto (best effort)" if load_auto_paste() else "copy-only"
+
+
+def resolve_paste_tool(configured: str | None) -> str:
+    if configured and configured != "auto":
+        return configured
+    if wayland_session_active():
+        backend = load_wayland_paste_backend()
+        if backend in {WAYLAND_PORTAL_BACKEND, "wtype"}:
+            return backend
+    return configured or "auto"
 
 
 def load_fast_mode() -> bool:
@@ -535,6 +666,7 @@ def resolve_whisper_threads(configured: int | None) -> int:
 
 def apply_runtime_settings(args: argparse.Namespace) -> None:
     args.auto_paste = resolve_auto_paste(getattr(args, "auto_paste", None))
+    args.paste_tool = resolve_paste_tool(getattr(args, "paste_tool", "auto"))
     args.fast_mode = resolve_fast_mode(getattr(args, "fast_mode", None))
     # Capture whether trim_silence was explicitly set (True/False) or left unspecified (None).
     # fast_mode auto-enables trim only when the user has not expressed an explicit preference.
@@ -672,6 +804,9 @@ def auto_paste(delay_ms: int, paste_tool: str = "auto", paste_key: str = "auto")
     if delay_ms < 0:
         raise VoiceCliError("--paste-delay-ms cannot be negative.")
 
+    if paste_tool == WAYLAND_PORTAL_BACKEND:
+        return wayland_portal_auto_paste(delay_ms, paste_key)
+
     command = paste_command(paste_tool, paste_key)
     ensure_paste_focus(command)
 
@@ -778,6 +913,8 @@ def _detect_paste_key_x11(xdotool: str) -> str:
 def paste_command(paste_tool: str, paste_key: str = "auto") -> list[str]:
     if paste_tool == "none":
         raise VoiceCliError("Auto-paste is disabled.")
+    if paste_tool == WAYLAND_PORTAL_BACKEND:
+        raise VoiceCliError("Portal auto-paste does not use an external command.")
     if paste_tool not in {"auto", "xdotool", "wtype"}:
         raise VoiceCliError(f"Unsupported paste tool: {paste_tool}")
 
@@ -803,7 +940,7 @@ def paste_command(paste_tool: str, paste_key: str = "auto") -> list[str]:
             raise VoiceCliError("Auto-paste requires xdotool on X11.")
 
     if paste_tool == "auto":
-        raise VoiceCliError("Auto-paste requires xdotool on X11 or wtype on Wayland.")
+        raise VoiceCliError("Auto-paste requires xdotool on X11, wtype on Wayland, or portal setup on Wayland.")
     raise VoiceCliError(f"Auto-paste tool is not usable in this session: {paste_tool}")
 
 
@@ -920,6 +1057,321 @@ def tool_environment(command: Sequence[str]) -> dict[str, str] | None:
         existing = env.get("LD_LIBRARY_PATH")
         env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing}" if existing else str(lib_dir)
     return env
+
+
+class WaylandPortalPasteSession:
+    def __init__(self) -> None:
+        if not HAVE_GIO:
+            raise VoiceCliError("Wayland portal auto-paste requires PyGObject. Install python3-gi or python3-gobject.")
+        if not wayland_session_active():
+            raise VoiceCliError("Wayland portal auto-paste requires a Wayland session.")
+        if not portal_remote_desktop_available():
+            raise VoiceCliError("Wayland portal auto-paste requires the RemoteDesktop portal with keyboard support.")
+
+        assert Gio is not None
+        assert GLib is not None
+
+        self.connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.session_handle: str | None = None
+
+    def request_path(self, token: str) -> str:
+        unique_name = self.connection.get_unique_name()
+        if not unique_name:
+            raise VoiceCliError("Could not determine the D-Bus unique name for the portal request.")
+        sender = unique_name.lstrip(":").replace(".", "_")
+        return f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+
+    def call_request(self, method_name: str, parameters: object, request_token: str) -> dict[str, object]:
+        assert Gio is not None
+        assert GLib is not None
+        response_event = threading.Event()
+        response_holder: dict[str, object] = {}
+        request_path = self.request_path(request_token)
+
+        def on_response(
+            _connection: object,
+            _sender_name: str,
+            object_path: str,
+            _interface_name: str,
+            _signal_name: str,
+            signal_parameters: object,
+        ) -> None:
+            unpacked = unpack_dbus_value(signal_parameters)
+            if not isinstance(unpacked, tuple) or len(unpacked) != 2:
+                response_holder["error"] = "Voice: unexpected portal response payload."
+                response_event.set()
+                return
+            response_holder["path"] = object_path
+            response_holder["response_code"] = unpacked[0]
+            response_holder["results"] = unpacked[1]
+            response_event.set()
+
+        subscription_id = self.connection.signal_subscribe(
+            PORTAL_BUS_NAME,
+            PORTAL_REQUEST_INTERFACE,
+            "Response",
+            request_path,
+            None,
+            Gio.DBusSignalFlags.NONE,
+            on_response,
+        )
+
+        try:
+            try:
+                reply = self.connection.call_sync(
+                    PORTAL_BUS_NAME,
+                    PORTAL_DESKTOP_PATH,
+                    PORTAL_REMOTE_DESKTOP_INTERFACE,
+                    method_name,
+                    parameters,
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    PORTAL_REQUEST_TIMEOUT_MS,
+                    None,
+                )
+            except Exception as exc:
+                raise VoiceCliError(f"Portal request {method_name} failed to start: {exc}") from exc
+            handle = unpack_dbus_value(reply.unpack()[0])
+            if isinstance(handle, str) and handle != request_path:
+                self.connection.signal_unsubscribe(subscription_id)
+                request_path = handle
+                subscription_id = self.connection.signal_subscribe(
+                    PORTAL_BUS_NAME,
+                    PORTAL_REQUEST_INTERFACE,
+                    "Response",
+                    request_path,
+                    None,
+                    Gio.DBusSignalFlags.NONE,
+                    on_response,
+                )
+
+            deadline = time.monotonic() + (PORTAL_REQUEST_TIMEOUT_MS / 1000)
+            context = GLib.MainContext.default()
+            while not response_event.is_set():
+                if time.monotonic() >= deadline:
+                    raise VoiceCliError(f"Portal request timed out while waiting for {method_name}.")
+                while context.pending():
+                    context.iteration(False)
+                time.sleep(0.01)
+
+            if "error" in response_holder:
+                raise VoiceCliError(str(response_holder["error"]))
+
+            response_code = response_holder.get("response_code")
+            if response_code != 0:
+                raise VoiceCliError(f"Portal request {method_name} was rejected with code {response_code}.")
+
+            results = response_holder.get("results")
+            return results if isinstance(results, dict) else {}
+        finally:
+            self.connection.signal_unsubscribe(subscription_id)
+
+    def create_session(self) -> str:
+        assert GLib is not None
+
+        handle_token = f"voice{time.monotonic_ns()}h"
+        session_token = f"voice{time.monotonic_ns()}s"
+        options = {
+            "handle_token": GLib.Variant("s", handle_token),
+            "session_handle_token": GLib.Variant("s", session_token),
+        }
+        results = self.call_request(
+            "CreateSession",
+            GLib.Variant("(a{sv})", (options,)),
+            handle_token,
+        )
+        session_handle = results.get("session_handle")
+        if not isinstance(session_handle, str) or not session_handle.startswith("/"):
+            raise VoiceCliError("Portal CreateSession did not return a valid session handle.")
+        self.session_handle = session_handle
+        return session_handle
+
+    def select_devices(self, session_handle: str, restore_token: str | None = None) -> None:
+        assert GLib is not None
+
+        handle_token = f"voice{time.monotonic_ns()}d"
+        options: dict[str, object] = {
+            "handle_token": GLib.Variant("s", handle_token),
+            "types": GLib.Variant("u", PORTAL_DEVICE_KEYBOARD),
+            "persist_mode": GLib.Variant("u", 2),
+        }
+        if restore_token:
+            options["restore_token"] = GLib.Variant("s", restore_token)
+        self.call_request(
+            "SelectDevices",
+            GLib.Variant("(oa{sv})", (session_handle, options)),
+            handle_token,
+        )
+
+    def start(self, session_handle: str) -> None:
+        assert GLib is not None
+
+        handle_token = f"voice{time.monotonic_ns()}r"
+        options = {"handle_token": GLib.Variant("s", handle_token)}
+        results = self.call_request(
+            "Start",
+            GLib.Variant("(osa{sv})", (session_handle, "", options)),
+            handle_token,
+        )
+        devices = results.get("devices")
+        if not isinstance(devices, int) or not (devices & PORTAL_DEVICE_KEYBOARD):
+            raise VoiceCliError("Desktop portal did not grant keyboard access for Wayland auto-paste.")
+        restore_token = results.get("restore_token")
+        if isinstance(restore_token, str) and restore_token.strip():
+            save_wayland_portal_restore_token(restore_token)
+        else:
+            save_wayland_portal_restore_token(None)
+
+    def ensure_open(self) -> None:
+        if self.session_handle:
+            return
+        restore_token = load_wayland_portal_restore_token()
+        session_handle = self.create_session()
+        try:
+            self.select_devices(session_handle, restore_token)
+            self.start(session_handle)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if not self.session_handle:
+            return
+        if HAVE_GIO:
+            assert Gio is not None
+            try:
+                self.connection.call_sync(
+                    PORTAL_BUS_NAME,
+                    self.session_handle,
+                    PORTAL_SESSION_INTERFACE,
+                    "Close",
+                    None,
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    1000,
+                    None,
+                )
+            except Exception:
+                pass
+        self.session_handle = None
+
+    def send_paste_key(self, paste_key: str) -> None:
+        self.ensure_open()
+        for keysym, state in portal_key_events(paste_key):
+            self.notify_keysym(keysym, state)
+
+    def notify_keysym(self, keysym: int, state: int) -> None:
+        if not self.session_handle:
+            raise VoiceCliError("Wayland portal session is not active.")
+        assert Gio is not None
+        assert GLib is not None
+        try:
+            self.connection.call_sync(
+                PORTAL_BUS_NAME,
+                PORTAL_DESKTOP_PATH,
+                PORTAL_REMOTE_DESKTOP_INTERFACE,
+                "NotifyKeyboardKeysym",
+                GLib.Variant("(oa{sv}iu)", (self.session_handle, {}, keysym, state)),
+                None,
+                Gio.DBusCallFlags.NONE,
+                1000,
+                None,
+            )
+        except Exception as exc:
+            raise VoiceCliError(f"Wayland portal key injection failed: {exc}") from exc
+
+
+_PORTAL_PASTE_SESSION_LOCK = threading.Lock()
+_PORTAL_PASTE_SESSION: WaylandPortalPasteSession | None = None
+_PORTAL_KEYSYMS: dict[str, int] = {
+    "ctrl": 0xFFE3,
+    "control": 0xFFE3,
+    "shift": 0xFFE1,
+    "alt": 0xFFE9,
+    "super": 0xFFEB,
+    "meta": 0xFFEB,
+    "insert": 0xFF63,
+}
+
+
+def portal_key_events(paste_key: str) -> list[tuple[int, int]]:
+    if paste_key == "auto":
+        paste_key = "ctrl+shift+v"
+
+    parts = [part.strip().lower() for part in paste_key.split("+") if part.strip()]
+    if not parts:
+        raise VoiceCliError("Wayland portal paste key is empty.")
+
+    def resolve_keysym(name: str) -> int:
+        if name in _PORTAL_KEYSYMS:
+            return _PORTAL_KEYSYMS[name]
+        if len(name) == 1:
+            return ord(name)
+        raise VoiceCliError(f"Wayland portal auto-paste does not know the key `{name}`.")
+
+    modifiers = [resolve_keysym(part) for part in parts[:-1]]
+    key = resolve_keysym(parts[-1])
+    return (
+        [(modifier, 1) for modifier in modifiers]
+        + [(key, 1), (key, 0)]
+        + [(modifier, 0) for modifier in reversed(modifiers)]
+    )
+
+
+def prepare_wayland_portal_paste_session() -> None:
+    global _PORTAL_PASTE_SESSION
+    try:
+        with _PORTAL_PASTE_SESSION_LOCK:
+            if _PORTAL_PASTE_SESSION is None:
+                _PORTAL_PASTE_SESSION = WaylandPortalPasteSession()
+            _PORTAL_PASTE_SESSION.ensure_open()
+    except VoiceCliError:
+        raise
+    except Exception as exc:
+        raise VoiceCliError(f"Wayland portal auto-paste setup failed: {exc}") from exc
+
+
+def shutdown_wayland_portal_paste_session() -> None:
+    global _PORTAL_PASTE_SESSION
+    with _PORTAL_PASTE_SESSION_LOCK:
+        if _PORTAL_PASTE_SESSION is not None:
+            _PORTAL_PASTE_SESSION.close()
+            _PORTAL_PASTE_SESSION = None
+
+
+def wayland_portal_auto_paste(delay_ms: int, paste_key: str = "auto") -> str:
+    if delay_ms < 0:
+        raise VoiceCliError("--paste-delay-ms cannot be negative.")
+    if delay_ms:
+        time.sleep(delay_ms / 1000)
+    try:
+        with _PORTAL_PASTE_SESSION_LOCK:
+            global _PORTAL_PASTE_SESSION
+            if _PORTAL_PASTE_SESSION is None:
+                _PORTAL_PASTE_SESSION = WaylandPortalPasteSession()
+            _PORTAL_PASTE_SESSION.send_paste_key(paste_key)
+    except VoiceCliError:
+        raise
+    except Exception as exc:
+        raise VoiceCliError(f"Wayland portal auto-paste failed: {exc}") from exc
+    return WAYLAND_PORTAL_BACKEND
+
+
+def maybe_warn_and_prepare_wayland_auto_paste(args: argparse.Namespace) -> None:
+    if not wayland_session_active():
+        return
+    if not getattr(args, "auto_paste", False):
+        return
+    if getattr(args, "paste_tool", "auto") != WAYLAND_PORTAL_BACKEND:
+        return
+    if load_wayland_portal_restore_token() is None:
+        print(
+            "Voice: Wayland auto-paste may show a desktop permission dialog labeled "
+            "`Remote Desktop` or `Remote Interaction`. Voice requests keyboard paste access only, not screen sharing.",
+            file=sys.stderr,
+            flush=True,
+        )
+    prepare_wayland_portal_paste_session()
 
 
 def copy_and_maybe_paste(text: str, args: argparse.Namespace) -> PasteResult:
@@ -1615,6 +2067,71 @@ def read_text_arg_or_stdin(text: str | None) -> str:
     return value
 
 
+def command_wayland_setup(args: argparse.Namespace) -> int:
+    if not wayland_session_active():
+        raise VoiceCliError("`voice wayland-setup` must be run from a Wayland desktop session.")
+    if args.enable_auto_paste and args.disable_auto_paste:
+        raise VoiceCliError("Choose either --enable-auto-paste or --disable-auto-paste, not both.")
+
+    if args.disable_auto_paste:
+        clear_wayland_portal_state()
+        save_auto_paste(False)
+        print("Voice: Wayland auto-paste disabled. Clipboard copy remains available.")
+        return 0
+
+    configured_backend = current_wayland_paste_backend_label()
+    restore_token_saved = load_wayland_portal_restore_token() is not None
+    portal_version = portal_remote_desktop_version()
+    portal_ready = portal_remote_desktop_available()
+
+    if args.status or not args.enable_auto_paste:
+        print("Session: Wayland")
+        print(f"Configured Wayland paste backend: {configured_backend}")
+        print(f"Auto-paste saved default: {'on' if load_auto_paste() else 'off'}")
+        print(f"Portal support: {'ready' if portal_ready else 'unavailable'}")
+        if isinstance(portal_version, int):
+            print(f"RemoteDesktop portal version: {portal_version}")
+        print(f"Portal restore token saved: {'yes' if restore_token_saved else 'no'}")
+        print("GNOME note: portal permission may appear as `Remote Desktop` or `Remote Interaction`.")
+        print("Voice uses that permission only to send the paste shortcut on Wayland, not to share the screen.")
+        return 0
+
+    if not HAVE_GIO:
+        raise VoiceCliError("Wayland portal auto-paste requires PyGObject. Install python3-gi or python3-gobject.")
+    if not portal_ready:
+        raise VoiceCliError("Wayland portal auto-paste is not available on this desktop session.")
+
+    print(
+        "Voice: GNOME may now show a system permission dialog labeled `Remote Desktop` or `Remote Interaction`.",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        "Voice: This request is only for keyboard paste access on Wayland. Voice does not request screen sharing here.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise VoiceCliError("Run `voice wayland-setup --enable-auto-paste --yes` in non-interactive mode.")
+        answer = input("Continue and ask the desktop for Wayland paste permission? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            raise VoiceCliError("Cancelled before opening the desktop permission dialog.")
+
+    session = WaylandPortalPasteSession()
+    try:
+        session.ensure_open()
+    finally:
+        session.close()
+
+    save_wayland_paste_backend(WAYLAND_PORTAL_BACKEND)
+    save_auto_paste(True)
+    print("Voice: Wayland auto-paste enabled via desktop portal.")
+    print("Voice: Future runs may reuse this permission with a fresh restore token when the desktop allows it.")
+    return 0
+
+
 def command_doctor(args: argparse.Namespace) -> int:
     model_root = default_model_root()
     checks: list[tuple[str, bool, str]] = []
@@ -1659,23 +2176,48 @@ def command_doctor(args: argparse.Namespace) -> int:
         ok = bool(path and path.is_file())
         explicit_model_paths_ok = explicit_model_paths_ok and ok
         checks.append(("llama model", ok, str(path)))
+    if wayland_session_active():
+        portal_backend_configured = load_wayland_paste_backend() == WAYLAND_PORTAL_BACKEND
+        checks.append(
+            (
+                "python3-gi",
+                HAVE_GIO,
+                "PyGObject available" if HAVE_GIO else "Required for Wayland portal auto-paste.",
+            )
+        )
+        if portal_backend_configured or portal_remote_desktop_version() is not None:
+            version = portal_remote_desktop_version()
+            devices = portal_remote_desktop_available_device_types()
+            portal_ok = portal_remote_desktop_available()
+            details = (
+                f"RemoteDesktop v{version}, keyboard devices mask={devices}"
+                if portal_ok and isinstance(version, int) and isinstance(devices, int)
+                else "RemoteDesktop portal with keyboard access is unavailable."
+            )
+            checks.append(("portal-remote", portal_ok, details))
 
     active_model = load_active_whisper_model()
     session_label = "Wayland" if wayland_session_active() else "X11" if os.environ.get("DISPLAY") else "headless"
+    configured_wayland_backend = current_wayland_paste_backend_label()
     print(f"Model root: {model_root}")
     print(f"Active Whisper model: {active_model.display_name if active_model else 'none'}")
     print(f"Session: {session_label}")
     print(f"Global hotkey: {load_hotkey()}")
     print(f"Language: {language_label(load_language())}")
     print(f"CPU threads: {os.cpu_count() or 'unknown'}")
-    print(f"Auto-paste default: {'off' if wayland_session_active() else 'on'}")
+    print(f"Auto-paste default: {'on' if load_auto_paste() else 'off'}")
     if whisper_cli_path:
         backend = whisper_backend_summary(whisper_cli_path)
         print(f"Whisper backend: {backend}")
         if backend == "CPU-only" and (os.cpu_count() or 0) <= 4:
             print("Recommendation: use Large v3 Turbo, Small, or Base for interactive latency; avoid Medium/Large v3 on CPU-only slow machines.")
     if wayland_session_active():
-        print("Wayland note: copy-only is safest. `wtype` auto-paste requires compositor virtual keyboard support and may fail.")
+        print(f"Wayland paste backend: {configured_wayland_backend}")
+        if configured_wayland_backend == WAYLAND_PORTAL_BACKEND:
+            print(f"Wayland portal restore token: {'saved' if load_wayland_portal_restore_token() else 'missing'}")
+            print("Wayland note: GNOME may label portal permission as `Remote Desktop` or `Remote Interaction`; Voice requests keyboard paste only.")
+        else:
+            print("Wayland note: copy-only is safest. `wtype` auto-paste requires compositor virtual keyboard support and may fail.")
     print("Whisper catalog:")
     for model in WHISPER_MODEL_CATALOG:
         state = "downloaded" if model.path().is_file() else "available"
@@ -1745,6 +2287,7 @@ def command_refine(args: argparse.Namespace) -> int:
 
 def command_run(args: argparse.Namespace) -> int:
     apply_runtime_settings(args)
+    maybe_warn_and_prepare_wayland_auto_paste(args)
     whisper_model = resolve_whisper_model(args.whisper_model)
     whisper_cli = resolve_executable(args.whisper_cli, ("whisper-cli",))
     args.language = resolve_language(args.language)
@@ -1804,6 +2347,8 @@ def command_run(args: argparse.Namespace) -> int:
             status(paste_result.paste_error)
     except VoiceCliError as exc:
         status(str(exc))
+    finally:
+        shutdown_wayland_portal_paste_session()
 
     status("Done")
     print(final_text)
@@ -2607,6 +3152,7 @@ def command_tui(args: argparse.Namespace) -> int:
         raise VoiceCliError("--seconds must be greater than zero.")
 
     apply_runtime_settings(args)
+    maybe_warn_and_prepare_wayland_auto_paste(args)
     args.hotkey = resolve_hotkey(args.hotkey)
     args.language = resolve_language(args.language)
     model_state = initial_tui_model_state(args.whisper_model)
@@ -2621,6 +3167,7 @@ def command_tui(args: argparse.Namespace) -> int:
     try:
         curses.wrapper(run_tui_screen, args, model_state, whisper_cli, llama_model, llama_cli)
     finally:
+        shutdown_wayland_portal_paste_session()
         STATUS_ENABLED = previous_status
     return 0
 
@@ -3099,6 +3646,7 @@ class DictationController:
                 pass
         if active_temp_dir is not None:
             active_temp_dir.cleanup()
+        shutdown_wayland_portal_paste_session()
 
     def finish_in_background(
         self,
@@ -3253,6 +3801,7 @@ def command_daemon(args: argparse.Namespace) -> int:
     apply_runtime_settings(args)
     args.hotkey = resolve_hotkey(getattr(args, "hotkey", None))
     args.language = resolve_language(args.language)
+    maybe_warn_and_prepare_wayland_auto_paste(args)
     resources = resolve_pipeline_resources(args)
     controller = DictationController(args, resources)
     socket_path = resolve_socket_path(args.socket_path)
@@ -3283,6 +3832,12 @@ def command_daemon(args: argparse.Namespace) -> int:
             if wayland_session_active() and not args.auto_paste:
                 print(
                     "Voice: Wayland default is clipboard copy only. Pass --auto-paste to opt into compositor-dependent paste.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif wayland_session_active() and args.paste_tool == WAYLAND_PORTAL_BACKEND:
+                print(
+                    "Voice: Wayland auto-paste is using the desktop portal. If permission is not already restored, GNOME may show a `Remote Desktop` or `Remote Interaction` dialog for keyboard paste access.",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -3407,9 +3962,9 @@ def add_paste_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--paste-tool",
-        choices=("auto", "xdotool", "wtype"),
+        choices=("auto", "xdotool", "wtype", WAYLAND_PORTAL_BACKEND),
         default="auto",
-        help="Keyboard injection backend for auto-paste.",
+        help="Keyboard injection backend for auto-paste. Use `portal` on Wayland after `voice wayland-setup --enable-auto-paste`.",
     )
     parser.add_argument(
         "--paste-key",
@@ -3446,6 +4001,24 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--whisper-model")
     doctor.add_argument("--llama-model")
     doctor.set_defaults(func=command_doctor)
+
+    wayland_setup = subparsers.add_parser(
+        "wayland-setup",
+        help="Configure explicit Wayland auto-paste setup and show portal permission status.",
+    )
+    wayland_setup.add_argument("--status", action="store_true", help="Show current Wayland portal auto-paste status.")
+    wayland_setup.add_argument(
+        "--enable-auto-paste",
+        action="store_true",
+        help="Request desktop portal permission for Wayland auto-paste and save the portal backend.",
+    )
+    wayland_setup.add_argument(
+        "--disable-auto-paste",
+        action="store_true",
+        help="Disable Wayland portal auto-paste and clear saved portal tokens.",
+    )
+    wayland_setup.add_argument("--yes", action="store_true", help="Skip the interactive confirmation before portal setup.")
+    wayland_setup.set_defaults(func=command_wayland_setup)
 
     record = subparsers.add_parser("record", help="Capture 16 kHz mono WAV audio.")
     add_quiet_arg(record)

@@ -45,7 +45,7 @@ DISTRO_LABEL=""
 
 APT_CORE_PACKAGES=(
   git build-essential cmake ninja-build pkg-config ccache curl wget
-  ffmpeg sox wl-clipboard xclip xdotool python3
+  ffmpeg sox wl-clipboard xclip xdotool python3 python3-gi
   libopenblas-dev pciutils
 )
 APT_OPTIONAL_PACKAGES=(
@@ -57,7 +57,7 @@ APT_OPTIONAL_PACKAGES=(
 
 DNF_CORE_PACKAGES=(
   git gcc gcc-c++ make cmake ninja-build pkgconf-pkg-config ccache curl wget
-  ffmpeg-free sox wl-clipboard xclip xdotool python3
+  ffmpeg-free sox wl-clipboard xclip xdotool python3 python3-gobject
   openblas-devel pipewire-utils alsa-utils pciutils
 )
 DNF_OPTIONAL_PACKAGES=(

@@ -112,7 +112,7 @@ VOICE_MIN_SPEECH_SECONDS=0.25
 VOICE_SECONDS=5    # only used by --auto-run or --once
 VOICE_AUTO_PASTE=1 # opt-in on Wayland; X11 default is on, Wayland default is off
 VOICE_PASTE_DELAY_MS=120
-VOICE_PASTE_TOOL=auto # auto, xdotool, or wtype
+VOICE_PASTE_TOOL=auto # auto, xdotool, wtype, or portal
 VOICE_HOTKEY=Ctrl+Alt+space # optional override; otherwise use saved shortcut
 VOICE_SOCKET_PATH=/tmp/voice.sock # optional override for daemon + trigger
 ```
@@ -156,8 +156,9 @@ final output is copied to the clipboard when `wl-copy`, `xclip`, `xsel`, or an
 OSC 52-capable terminal is available. Auto-paste is enabled by default: on Linux
 Mint Cinnamon/X11 it sends `Ctrl+V` with `xdotool` when installed, otherwise it
 uses a native XTest fallback through `libX11`/`libXtst`; on Wayland the default
-is copy-only, and `wtype` paste is opt-in. Use `--auto-paste` or
-`VOICE_AUTO_PASTE=1` to enable Wayland paste. Use `--no-auto-paste` or
+is copy-only. For supported Wayland auto-paste, run
+`voice wayland-setup --enable-auto-paste` first; `wtype` remains a best-effort
+fallback. Use `--auto-paste` or `VOICE_AUTO_PASTE=1` to enable Wayland paste. Use `--no-auto-paste` or
 `VOICE_AUTO_PASTE=0` to force copy-only. Press `Q` to quit. For a one-shot timed smoke test that exits
 automatically using the active model:
 
@@ -206,14 +207,18 @@ voice trigger --action toggle
 
 Recommended Fedora / GNOME path:
 
-1. Start `voice daemon` in one terminal.
-2. Open Keyboard Shortcuts in system settings.
-3. Add custom shortcut command: `voice trigger --action toggle`
-4. Press shortcut once to start recording.
-5. Press same shortcut again to stop, transcribe, and copy output.
+1. Run `voice wayland-setup --enable-auto-paste`.
+2. Read the terminal warning before accepting the system dialog.
+3. GNOME may label that dialog `Remote Desktop` or `Remote Interaction`.
+4. Voice uses that permission only for keyboard paste access, not screen sharing.
+5. Start `voice daemon` in one terminal.
+6. Open Keyboard Shortcuts in system settings.
+7. Add custom shortcut command: `voice trigger --action toggle`
+8. Press shortcut once to start recording.
+9. Press same shortcut again to stop, transcribe, and paste output.
 
-On Fedora GNOME Wayland, treat clipboard copy as stable baseline behavior.
-`wtype` auto-paste is compositor-dependent and can fail with errors like
+If you skip portal setup, clipboard copy remains the stable baseline behavior.
+`wtype` auto-paste is compositor-dependent and can still fail with errors like
 `Compositor does not support the virtual keyboard protocol`.
 
 ## Automated Setup
@@ -287,7 +292,7 @@ the same when it chooses the Vulkan path.
 sudo dnf install -y \
   git gcc gcc-c++ make cmake ninja-build pkgconf-pkg-config ccache curl wget \
   ffmpeg-free sox wl-clipboard xclip xdotool wtype \
-  python3 openblas-devel pipewire-utils alsa-utils pciutils
+  python3 python3-gobject openblas-devel pipewire-utils alsa-utils pciutils
 ```
 
 Vulkan path:

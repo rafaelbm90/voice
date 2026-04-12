@@ -107,7 +107,7 @@ case "${1:-}" in
     shift
     run_tui "$@"
     ;;
-  doctor|record|transcribe|refine)
+  doctor|record|transcribe|refine|wayland-setup)
     exec python3 -B "${SCRIPT_DIR}/voice.py" "$@"
     ;;
   -*)
