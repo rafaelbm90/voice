@@ -204,7 +204,7 @@ bash tools/voice-cli/install.sh
 
 This installs system packages, inspects your graphics hardware, picks the best
 backend it can validate, builds `whisper-cli` from source, and symlinks the
-`voice` command to `~/.local/bin`.
+`voice` command to `~/.local/bin`. The installer supports both `apt` and `dnf`.
 Re-run with `--update` to pull the latest whisper.cpp and rebuild.
 In `--gpu auto` mode, the installer now pulls in Vulkan build/runtime packages
 for AMD and Intel Arc-class systems when that path looks appropriate, and falls
@@ -258,6 +258,28 @@ installed. That is enough to detect a Vulkan runtime, but not enough to build
 If you run `bash tools/voice-cli/install.sh --gpu vulkan`, the installer now
 pulls in those Vulkan packages automatically before building. `--gpu auto` does
 the same when it chooses the Vulkan path.
+
+### Fedora base packages
+
+```bash
+sudo dnf install -y \
+  git gcc gcc-c++ make cmake ninja-build pkgconf-pkg-config ccache curl wget \
+  ffmpeg-free sox wl-clipboard xclip xdotool wtype \
+  python3 openblas-devel pipewire-utils alsa-utils pciutils
+```
+
+Vulkan path:
+
+```bash
+sudo dnf install -y vulkan-tools vulkan-loader-devel shaderc
+vulkaninfo
+```
+
+If Vulkan still fails on Fedora, rerun the installer with:
+
+```bash
+bash tools/voice-cli/install.sh --gpu cpu
+```
 
 NVIDIA CUDA path:
 

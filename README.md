@@ -81,9 +81,9 @@ ln -sfn "$PWD/voice" ~/.local/bin/voice
 bash tools/voice-cli/install.sh
 ```
 
-Installs system packages, inspects your hardware, picks the best validated
-backend it can, builds `whisper.cpp`, and wires the `voice` command to
-`~/.local/bin`. Then:
+Installs system packages through `apt` or `dnf`, inspects your hardware, picks
+the best validated backend it can, builds `whisper.cpp`, and wires the `voice`
+command to `~/.local/bin`. Then:
 
 ```bash
 voice        # launch the TUI
@@ -96,6 +96,9 @@ bash tools/voice-cli/install.sh --gpu cpu
 bash tools/voice-cli/install.sh --gpu vulkan
 bash tools/voice-cli/install.sh --gpu cuda
 ```
+
+On Fedora, `--gpu cpu` is useful as a known-good fallback when Vulkan build or
+runtime validation is not ready yet.
 
 See `docs/linux-mvp.md` for GPU options, manual steps, and troubleshooting.
 

@@ -34,9 +34,39 @@ VOICE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/voice"
 WHISPER_SRC_DIR="${VOICE_DATA_DIR}/src/whisper.cpp"
 WHISPER_BUILD_DIR="${WHISPER_SRC_DIR}/build"
 WHISPER_BIN="${WHISPER_BUILD_DIR}/bin/whisper-cli"
+WHISPER_BUILD_FLAGS_FILE="${WHISPER_BUILD_DIR}/.voice-cmake-flags"
+WHISPER_CMAKE_CACHE_FILE="${WHISPER_BUILD_DIR}/CMakeCache.txt"
 LOCAL_BIN="${HOME}/.local/bin"
 VOICE_WRAPPER="${REPO_ROOT}/tools/voice-cli/voice"
 WHISPER_REPO="https://github.com/ggerganov/whisper.cpp.git"
+
+PACKAGE_MANAGER=""
+DISTRO_LABEL=""
+
+APT_CORE_PACKAGES=(
+  git build-essential cmake ninja-build pkg-config ccache curl wget
+  ffmpeg sox wl-clipboard xclip xdotool python3
+  libopenblas-dev pciutils
+)
+APT_OPTIONAL_PACKAGES=(
+  wtype
+  vulkan-tools
+  libvulkan-dev
+  glslc
+)
+
+DNF_CORE_PACKAGES=(
+  git gcc gcc-c++ make cmake ninja-build pkgconf-pkg-config ccache curl wget
+  ffmpeg-free sox wl-clipboard xclip xdotool python3
+  openblas-devel pipewire-utils alsa-utils pciutils
+)
+DNF_OPTIONAL_PACKAGES=(
+  wtype
+  vulkan-tools
+  vulkan-loader-devel
+  shaderc
+  glslc
+)
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -115,35 +145,61 @@ die()   { printf "${_tty_bold}\033[31m[voice] error:${_tty_reset} %s\n" "$*" >&2
 # ---------------------------------------------------------------------------
 # check_prerequisites
 # ---------------------------------------------------------------------------
+detect_package_manager() {
+  if command -v apt-get &>/dev/null; then
+    PACKAGE_MANAGER="apt"
+    DISTRO_LABEL="apt-based distro"
+    return 0
+  fi
+
+  if command -v dnf &>/dev/null; then
+    PACKAGE_MANAGER="dnf"
+    DISTRO_LABEL="dnf-based distro"
+    return 0
+  fi
+
+  die "Unsupported Linux package manager. Expected apt-get or dnf."
+}
+
 check_prerequisites() {
   step "Checking prerequisites..."
 
-  if [[ ! -f /etc/debian_version ]] && ! command -v apt-get &>/dev/null; then
-    die "This script requires an apt-based Linux distro (Ubuntu, Debian, Mint, etc.)."
-  fi
+  detect_package_manager
 
   if ! command -v python3 &>/dev/null; then
-    die "python3 is required but not found. Install it first: sudo apt install python3"
+    die "python3 is required but not found. Install it with your system package manager first."
   fi
 
   if ! command -v git &>/dev/null; then
-    die "git is required but not found. Install it first: sudo apt install git"
+    die "git is required but not found. Install it with your system package manager first."
   fi
 
-  ok "Prerequisites OK"
+  ok "Prerequisites OK (${DISTRO_LABEL})"
 }
 
 # ---------------------------------------------------------------------------
-# install_apt_packages
+# install system packages
 # ---------------------------------------------------------------------------
+install_optional_apt_packages() {
+  local package=""
+  local available=()
+  for package in "$@"; do
+    if apt-cache show "${package}" >/dev/null 2>&1; then
+      available+=("${package}")
+    else
+      warn "Optional package unavailable on this apt repo set: ${package}"
+    fi
+  done
+
+  if [[ "${#available[@]}" -gt 0 ]]; then
+    sudo apt-get install -y --no-upgrade "${available[@]}"
+  fi
+}
+
 install_apt_packages() {
   step "Installing system packages..."
 
-  local packages=(
-    git build-essential cmake ninja-build pkg-config ccache curl wget
-    ffmpeg sox xclip xdotool python3
-    libopenblas-dev pciutils
-  )
+  local packages=("${APT_CORE_PACKAGES[@]}")
 
   # Audio: if PipeWire/PulseAudio is already running keep it; otherwise add ALSA
   if pactl info &>/dev/null 2>&1; then
@@ -151,19 +207,34 @@ install_apt_packages() {
   else
     packages+=(alsa-utils)
   fi
+
+  sudo apt-get update
   sudo apt-get install -y --no-upgrade "${packages[@]}"
+
+  step "Installing optional packages when available..."
+  install_optional_apt_packages "${APT_OPTIONAL_PACKAGES[@]}"
 
   ok "System packages installed"
 }
 
-install_optional_apt_packages() {
-  if [[ "$#" -eq 0 ]]; then
-    return 0
-  fi
+install_dnf_packages() {
+  step "Installing system packages..."
 
-  step "Installing optional packages: $*"
-  sudo apt-get install -y --no-upgrade "$@"
-  ok "Optional packages installed"
+  sudo dnf makecache -y -q
+  sudo dnf install -y -q "${DNF_CORE_PACKAGES[@]}"
+
+  step "Installing optional packages when available..."
+  sudo dnf install -y -q --skip-unavailable "${DNF_OPTIONAL_PACKAGES[@]}" || true
+
+  ok "System packages installed"
+}
+
+install_system_packages() {
+  case "${PACKAGE_MANAGER}" in
+    apt) install_apt_packages ;;
+    dnf) install_dnf_packages ;;
+    *) die "Unsupported package manager: ${PACKAGE_MANAGER}" ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -236,13 +307,21 @@ detect_graphics_hardware() {
 }
 
 ensure_vulkan_packages() {
-  local packages=(libvulkan-dev vulkan-tools glslc)
-
-  if [[ "${GPU_KIND}" == "amd" ]] || [[ "${GPU_KIND}" == "intel-arc" ]] || [[ "${GPU_KIND}" == "intel-integrated" ]]; then
-    packages+=(mesa-vulkan-drivers)
-  fi
-
-  install_optional_apt_packages "${packages[@]}"
+  case "${PACKAGE_MANAGER}" in
+    apt)
+      local packages=(libvulkan-dev vulkan-tools glslc)
+      if [[ "${GPU_KIND}" == "amd" ]] || [[ "${GPU_KIND}" == "intel-arc" ]] || [[ "${GPU_KIND}" == "intel-integrated" ]]; then
+        packages+=(mesa-vulkan-drivers)
+      fi
+      install_optional_apt_packages "${packages[@]}"
+      ;;
+    dnf)
+      sudo dnf install -y -q --skip-unavailable vulkan-tools vulkan-loader-devel shaderc glslc || true
+      ;;
+    *)
+      die "Unsupported package manager: ${PACKAGE_MANAGER}"
+      ;;
+  esac
 }
 
 try_enable_vulkan_backend() {
@@ -346,6 +425,8 @@ configure_whisper_cpp() {
         -S "${WHISPER_SRC_DIR}"; then
     return 1
   fi
+
+  printf '%s' "${gpu_flags}" > "${WHISPER_BUILD_FLAGS_FILE}"
 }
 
 # ---------------------------------------------------------------------------
@@ -354,8 +435,27 @@ configure_whisper_cpp() {
 build_whisper_cpp() {
   # Skip if binary already exists and --update was not requested
   if [[ -x "${WHISPER_BIN}" ]] && [[ "${UPDATE}" -eq 0 ]]; then
-    ok "whisper-cli already built — skipping (pass --update to rebuild)"
-    return 0
+    local previous_flags=""
+
+    if [[ -f "${WHISPER_BUILD_FLAGS_FILE}" ]]; then
+      previous_flags="$(<"${WHISPER_BUILD_FLAGS_FILE}")"
+      if [[ "${previous_flags}" != "${CMAKE_GPU_FLAGS}" ]]; then
+        warn "Build backend changed since last install. Rebuilding whisper.cpp."
+      else
+        ok "whisper-cli already built — skipping (pass --update to rebuild)"
+        return 0
+      fi
+    elif [[ -f "${WHISPER_CMAKE_CACHE_FILE}" ]] && [[ "${CMAKE_GPU_FLAGS}" != *"GGML_CUDA=ON"* ]]; then
+      if grep -q "GGML_CUDA:.*=ON" "${WHISPER_CMAKE_CACHE_FILE}"; then
+        warn "Found stale CUDA config in cached CMake state. Rebuilding whisper.cpp."
+      else
+        ok "whisper-cli already built — skipping (pass --update to rebuild)"
+        return 0
+      fi
+    else
+      ok "whisper-cli already built — skipping (pass --update to rebuild)"
+      return 0
+    fi
   fi
 
   # Clone if source directory is absent
@@ -488,7 +588,7 @@ main() {
   echo ""
 
   check_prerequisites
-  install_apt_packages
+  install_system_packages
   select_gpu_backend
   build_whisper_cpp
   install_symlinks
