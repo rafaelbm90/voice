@@ -604,6 +604,26 @@ def current_wayland_paste_backend_label() -> str:
     return "auto (best effort)" if load_auto_paste() else "copy-only"
 
 
+def wayland_portal_status_label() -> str:
+    if not wayland_session_active():
+        return "n/a"
+    if not load_auto_paste():
+        return "Off"
+    backend = load_wayland_paste_backend()
+    if backend != WAYLAND_PORTAL_BACKEND:
+        return "Needs setup"
+    if not HAVE_GIO:
+        return "PyGObject missing"
+    if not portal_remote_desktop_available():
+        return "Portal unavailable"
+    return "Ready" if load_wayland_portal_restore_token() else "Enabled"
+
+
+def add_wayland_portal_guidance(message: str) -> str:
+    guidance = " Rerun `voice wayland-setup --enable-auto-paste` if portal permission was revoked, denied, or expired."
+    return message if "voice wayland-setup --enable-auto-paste" in message else message + guidance
+
+
 def resolve_paste_tool(configured: str | None) -> str:
     if configured and configured != "auto":
         return configured
@@ -1325,10 +1345,10 @@ def prepare_wayland_portal_paste_session() -> None:
             if _PORTAL_PASTE_SESSION is None:
                 _PORTAL_PASTE_SESSION = WaylandPortalPasteSession()
             _PORTAL_PASTE_SESSION.ensure_open()
-    except VoiceCliError:
-        raise
+    except VoiceCliError as exc:
+        raise VoiceCliError(add_wayland_portal_guidance(str(exc))) from exc
     except Exception as exc:
-        raise VoiceCliError(f"Wayland portal auto-paste setup failed: {exc}") from exc
+        raise VoiceCliError(add_wayland_portal_guidance(f"Wayland portal auto-paste setup failed: {exc}")) from exc
 
 
 def shutdown_wayland_portal_paste_session() -> None:
@@ -1350,10 +1370,10 @@ def wayland_portal_auto_paste(delay_ms: int, paste_key: str = "auto") -> str:
             if _PORTAL_PASTE_SESSION is None:
                 _PORTAL_PASTE_SESSION = WaylandPortalPasteSession()
             _PORTAL_PASTE_SESSION.send_paste_key(paste_key)
-    except VoiceCliError:
-        raise
+    except VoiceCliError as exc:
+        raise VoiceCliError(add_wayland_portal_guidance(str(exc))) from exc
     except Exception as exc:
-        raise VoiceCliError(f"Wayland portal auto-paste failed: {exc}") from exc
+        raise VoiceCliError(add_wayland_portal_guidance(f"Wayland portal auto-paste failed: {exc}")) from exc
     return WAYLAND_PORTAL_BACKEND
 
 
@@ -2088,6 +2108,7 @@ def command_wayland_setup(args: argparse.Namespace) -> int:
         print("Session: Wayland")
         print(f"Configured Wayland paste backend: {configured_backend}")
         print(f"Auto-paste saved default: {'on' if load_auto_paste() else 'off'}")
+        print(f"Portal status: {wayland_portal_status_label()}")
         print(f"Portal support: {'ready' if portal_ready else 'unavailable'}")
         if isinstance(portal_version, int):
             print(f"RemoteDesktop portal version: {portal_version}")
@@ -2213,9 +2234,12 @@ def command_doctor(args: argparse.Namespace) -> int:
             print("Recommendation: use Large v3 Turbo, Small, or Base for interactive latency; avoid Medium/Large v3 on CPU-only slow machines.")
     if wayland_session_active():
         print(f"Wayland paste backend: {configured_wayland_backend}")
+        print(f"Wayland portal status: {wayland_portal_status_label()}")
         if configured_wayland_backend == WAYLAND_PORTAL_BACKEND:
             print(f"Wayland portal restore token: {'saved' if load_wayland_portal_restore_token() else 'missing'}")
             print("Wayland note: GNOME may label portal permission as `Remote Desktop` or `Remote Interaction`; Voice requests keyboard paste only.")
+        elif wayland_portal_status_label() == "Needs setup":
+            print("Wayland note: run `voice wayland-setup --enable-auto-paste` for supported portal-backed auto-paste.")
         else:
             print("Wayland note: copy-only is safest. `wtype` auto-paste requires compositor virtual keyboard support and may fail.")
     print("Whisper catalog:")
@@ -2748,27 +2772,43 @@ def run_language_manager(view: TuiView, args: argparse.Namespace) -> None:
             return
 
 
-_SETTINGS_DETAILS: dict[str, list[str]] = {
-    "Auto-paste": [
-        "Pastes the final text into the focused window after transcription.",
-        "Uses xdotool (X11) or wtype (Wayland) to send Ctrl+V.",
-    ],
-    "Fast mode": [
-        "Recommended for slow devices. Enables silence trim and skips",
-        "the heuristic cleanup pass to cut post-record latency.",
-        "An explicit --refine llama still uses LLM refinement.",
-    ],
-    "Trim silence": [
-        "Strips leading/trailing silence with ffmpeg before transcription.",
-        "Reduces whisper-cli work on recordings with long pauses.",
-        "Skipped automatically for clips shorter than 1.5 s.",
-    ],
-    "Threads": [
-        "CPU threads used by whisper-cli. Lower = less thermal load;",
-        "higher = faster transcription up to physical core count.",
-        "Left/Right to adjust. Saved to config.",
-    ],
-}
+def settings_detail_lines(label: str, args: argparse.Namespace) -> list[str]:
+    if label == "Auto-paste":
+        if wayland_session_active():
+            return [
+                "Wayland auto-paste should use the portal path for reliable paste.",
+                f"Current status: {wayland_portal_status_label()}",
+                "If needed, run `voice wayland-setup --enable-auto-paste` outside the TUI.",
+            ]
+        return [
+            "Pastes the final text into the focused window after transcription.",
+            "Uses xdotool (X11) or XTest fallback to send the paste shortcut.",
+        ]
+    if label == "Wayland portal":
+        return [
+            f"Portal status: {wayland_portal_status_label()}",
+            "Run `voice wayland-setup --status` for details.",
+            "Run `voice wayland-setup --enable-auto-paste` outside the TUI to grant or refresh permission.",
+        ]
+    if label == "Fast mode":
+        return [
+            "Recommended for slow devices. Enables silence trim and skips",
+            "the heuristic cleanup pass to cut post-record latency.",
+            "An explicit --refine llama still uses LLM refinement.",
+        ]
+    if label == "Trim silence":
+        return [
+            "Strips leading/trailing silence with ffmpeg before transcription.",
+            "Reduces whisper-cli work on recordings with long pauses.",
+            "Skipped automatically for clips shorter than 1.5 s.",
+        ]
+    if label == "Threads":
+        return [
+            "CPU threads used by whisper-cli. Lower = less thermal load;",
+            "higher = faster transcription up to physical core count.",
+            "Left/Right to adjust. Saved to config.",
+        ]
+    return []
 
 
 def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
@@ -2778,12 +2818,17 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
     view.flush_input()
 
     def items() -> list[tuple[str, str]]:
-        return [
+        values = [
             ("Auto-paste", "On" if args.auto_paste else "Off"),
+        ]
+        if wayland_session_active():
+            values.append(("Wayland portal", wayland_portal_status_label()))
+        values.extend([
             ("Fast mode", "On" if args.fast_mode else "Off"),
             ("Trim silence", "On" if args.trim_silence else "Off"),
             ("Threads", str(args.whisper_threads)),
-        ]
+        ])
+        return values
 
     while True:
         height, width = screen.getmaxyx()
@@ -2807,7 +2852,7 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
             view.add_text(3 + index, 0, f"{marker} {label:14} {value}", attr)
 
         selected_label = current_items[selected][0]
-        detail_lines = _SETTINGS_DETAILS.get(selected_label, [])
+        detail_lines = settings_detail_lines(selected_label, args)
         for offset, line in enumerate(detail_lines, start=9):
             view.add_text(offset, 0, line)
 
@@ -2827,8 +2872,11 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
             selected = (selected + 1) % len(current_items)
             continue
 
+        current_labels = [label for label, _value in current_items]
+        selected_label = current_labels[selected]
+
         # Threads stepper: Left/Right arrows or -/+
-        if selected == 3:
+        if selected_label == "Threads":
             if key in (curses.KEY_LEFT, ord("-")):
                 args.whisper_threads = max(1, args.whisper_threads - 1)
                 save_whisper_threads(args.whisper_threads)
@@ -2842,11 +2890,16 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
         if key not in (ord("\n"), curses.KEY_ENTER, ord(" "), ord("t"), ord("T")):
             continue
 
-        if selected == 0:
+        if selected_label == "Auto-paste":
             args.auto_paste = not args.auto_paste
             save_auto_paste(args.auto_paste)
             view.add_log(f"Auto-paste {'enabled' if args.auto_paste else 'disabled'}.")
-        elif selected == 1:
+            if wayland_session_active() and args.auto_paste and load_wayland_paste_backend() != WAYLAND_PORTAL_BACKEND:
+                view.add_log("Wayland auto-paste needs portal setup. Run `voice wayland-setup --enable-auto-paste` outside the TUI.")
+        elif selected_label == "Wayland portal":
+            view.add_log(f"Wayland portal status: {wayland_portal_status_label()}.")
+            view.add_log("Run `voice wayland-setup --status` or `voice wayland-setup --enable-auto-paste` outside the TUI.")
+        elif selected_label == "Fast mode":
             args.fast_mode = not args.fast_mode
             save_fast_mode(args.fast_mode)
             if args.fast_mode and args.refine == "heuristic":
@@ -2857,7 +2910,7 @@ def run_settings_manager(view: TuiView, args: argparse.Namespace) -> None:
                 args.trim_silence = True
                 save_trim_silence(True)
             view.add_log(f"Fast mode {'enabled' if args.fast_mode else 'disabled'}.")
-        elif selected == 2:
+        elif selected_label == "Trim silence":
             args.trim_silence = not args.trim_silence
             save_trim_silence(args.trim_silence)
             view.add_log(f"Trim silence {'enabled' if args.trim_silence else 'disabled'}.")
