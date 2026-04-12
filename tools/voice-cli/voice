@@ -69,6 +69,7 @@ fi
 
 run_tui() {
   exec python3 -B "${SCRIPT_DIR}/voice.py" tui \
+    "${SOCKET_ARGS[@]}" \
     --seconds "${VOICE_SECONDS:-5}" \
     "${DEFAULT_ARGS[@]}" \
     "$@"

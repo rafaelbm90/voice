@@ -2462,10 +2462,16 @@ class TuiView:
         self.add_text(0, 0, "Voice Linux TUI MVP", curses.A_BOLD)
         self.add_text(1, 0, f"Phase: {self.phase}")
         self.add_text(2, 0, f"Detail: {self.detail}")
-        self.add_text(3, 0, f"Global hotkey: {self.hotkey or 'disabled'}")
+        if wayland_session_active():
+            self.add_text(3, 0, f"Wayland trigger: {self.hotkey or 'press H for help'}")
+        else:
+            self.add_text(3, 0, f"Global hotkey: {self.hotkey or 'disabled'}")
         self.add_text(4, 0, f"Active Whisper model: {self.model_state.active_label()}")
         self.add_text(5, 0, f"Language: {language_label(self.language)}")
-        self.add_text(6, 0, "Controls: R record | M models | L language | S settings | H shortcut | Q quit")
+        if wayland_session_active():
+            self.add_text(6, 0, "Controls: R record | M models | L language | S settings | H shortcut help | Q quit")
+        else:
+            self.add_text(6, 0, "Controls: R record | M models | L language | S settings | H shortcut | Q quit")
 
         active_key = self.model_state.active.key if self.model_state.active else ""
         cpu_only = self.gpu_backend in ("CPU-only", "unknown", "")
@@ -2772,6 +2778,58 @@ def run_language_manager(view: TuiView, args: argparse.Namespace) -> None:
             return
 
 
+def run_wayland_shortcut_helper(view: TuiView) -> None:
+    screen = view.screen
+    view.flush_input()
+    instructions = [
+        "Wayland Shortcut Helper",
+        "",
+        "GNOME custom shortcuts are the supported Wayland trigger path.",
+        "",
+        "Open:",
+        "Settings -> Keyboard -> Keyboard Shortcuts -> View and Customize Shortcuts -> Custom Shortcuts",
+        "",
+        "Add a shortcut with command:",
+        "voice trigger --action toggle",
+        "",
+        "Press your chosen shortcut once to start recording.",
+        "Press the same shortcut again to stop, transcribe, and paste/copy.",
+        "",
+        "If the TUI shows the Wayland trigger as ready, no separate `voice daemon` is needed.",
+        "Keep the TUI open while using the shortcut.",
+        "",
+        "Press Q or Esc to close.",
+    ]
+
+    while True:
+        height, width = screen.getmaxyx()
+        screen.erase()
+        if height < 18 or width < 76:
+            view.add_text(0, 0, "Shortcut helper needs at least 76x18.", curses.A_BOLD)
+            screen.refresh()
+            time.sleep(0.1)
+            key = screen.getch()
+            if key in (ord("q"), ord("Q"), 27):
+                view.flush_input()
+                view.draw()
+                return
+            continue
+
+        for index, line in enumerate(instructions):
+            attr = curses.A_BOLD if index == 0 else 0
+            view.add_text(index, 0, line, attr)
+        screen.refresh()
+
+        key = screen.getch()
+        if key == -1:
+            time.sleep(0.1)
+            continue
+        if key in (ord("q"), ord("Q"), 27, ord("h"), ord("H")):
+            view.flush_input()
+            view.draw()
+            return
+
+
 def settings_detail_lines(label: str, args: argparse.Namespace) -> list[str]:
     if label == "Auto-paste":
         if wayland_session_active():
@@ -2951,11 +3009,14 @@ def capture_tui_audio_toggle(
     view: TuiView,
     args: argparse.Namespace,
     audio_path: Path,
+    trigger_controller: "TuiTriggerController | None",
     should_stop: Callable[[], bool],
 ) -> Path:
     view.set_phase("Starting recorder", f"backend={args.backend}")
     view.flush_input()
     session = start_recording_session(audio_path, args.backend)
+    if trigger_controller:
+        trigger_controller.note_recording_started(session.backend_name)
     view.add_log(f"Recording with {session.backend_name}. Press r to stop.")
 
     while True:
@@ -2965,14 +3026,20 @@ def capture_tui_audio_toggle(
         key = view.screen.getch()
         if should_stop() or key in (ord("r"), ord("R"), ord("\n"), curses.KEY_ENTER):
             view.add_log("Stopping recording.")
+            if trigger_controller:
+                trigger_controller.note_processing_started()
             view.flush_input()
             break
         if key in (ord("q"), ord("Q")):
             stop_recording(session.process)
+            if trigger_controller:
+                trigger_controller.note_idle()
             view.flush_input()
             raise VoiceCliError("Recording cancelled.")
         if session.process.poll() is not None:
             view.add_log("Recorder stopped.")
+            if trigger_controller:
+                trigger_controller.note_processing_started()
             break
 
         time.sleep(0.05)
@@ -2987,6 +3054,8 @@ def run_tui_pipeline(
     whisper_cli: Path,
     llama_model: Path | None,
     llama_cli: Path | None,
+    trigger_controller: "TuiTriggerController | None",
+    allow_auto_paste: bool,
     should_stop_recording: Callable[[], bool],
 ) -> str:
     whisper_model = model_state.active_path()
@@ -3017,9 +3086,14 @@ def run_tui_pipeline(
                 lambda: record_audio(audio_path, args.backend, seconds),
                 poll_interval=0.1,
             )
+            if trigger_controller:
+                trigger_controller.note_recording_started(args.backend)
         else:
             view.add_log(f"Waiting for toggle recording with backend={args.backend}.")
-            capture_tui_audio_toggle(view, args, audio_path, should_stop_recording)
+            capture_tui_audio_toggle(view, args, audio_path, trigger_controller, should_stop_recording)
+
+        if trigger_controller:
+            trigger_controller.note_processing_started()
 
         if audio_path.exists():
             size_kb = audio_path.stat().st_size / 1024
@@ -3082,18 +3156,187 @@ def run_tui_pipeline(
     view.set_output(final_text)
     view.set_phase("Complete", "Pipeline finished")
     try:
-        paste_result = copy_and_maybe_paste(final_text, args)
-        view.add_log(f"Copied final output to clipboard with {paste_result.clipboard_tool}.")
-        if paste_result.paste_tool:
-            view.add_log(f"Pasted final output with {paste_result.paste_tool}.")
-        elif paste_result.paste_error:
-            view.add_log(paste_result.paste_error)
+        if allow_auto_paste:
+            paste_result = copy_and_maybe_paste(final_text, args)
+            view.add_log(f"Copied final output to clipboard with {paste_result.clipboard_tool}.")
+            if paste_result.paste_tool:
+                view.add_log(f"Pasted final output with {paste_result.paste_tool}.")
+            elif paste_result.paste_error:
+                view.add_log(paste_result.paste_error)
+        else:
+            clipboard_tool = copy_to_clipboard(final_text)
+            view.add_log(f"Copied final output to clipboard with {clipboard_tool}.")
+            if args.auto_paste:
+                view.add_log("Auto-paste suppressed for a TUI-initiated run to avoid pasting back into the Voice terminal.")
     except VoiceCliError as exc:
         view.add_log(str(exc))
 
     view.add_log("Pipeline complete.")
     view.flush_input()
     return final_text
+
+
+class TuiTriggerController:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.state = "idle"
+        self.backend_name: str | None = None
+        self.pending_start = False
+        self.pending_stop = False
+
+    def state_label(self) -> str:
+        with self.lock:
+            return self.state
+
+    def status_message(self) -> str:
+        with self.lock:
+            if self.state == "processing":
+                return "Voice: processing last recording."
+            if self.state == "recording":
+                if self.backend_name:
+                    return f"Voice: recording with {self.backend_name}."
+                return "Voice: recording requested from the TUI."
+            return "Voice: idle."
+
+    def start(self) -> str:
+        with self.lock:
+            if self.state == "processing":
+                return "Voice: still processing; start ignored."
+            if self.state == "recording":
+                if self.backend_name:
+                    return f"Voice: already recording with {self.backend_name}."
+                return "Voice: recording already requested."
+            self.state = "recording"
+            self.backend_name = None
+            self.pending_start = True
+            self.pending_stop = False
+        return "Voice: recording requested from the TUI."
+
+    def stop(self) -> str:
+        with self.lock:
+            if self.state == "processing":
+                return "Voice: still processing; stop ignored."
+            if self.state != "recording":
+                return "Voice: already idle."
+            self.state = "processing"
+            self.pending_stop = True
+            self.pending_start = False
+        return "Voice: recording stopped; processing..."
+
+    def toggle(self) -> str:
+        with self.lock:
+            should_start = self.state == "idle"
+        return self.start() if should_start else self.stop()
+
+    def consume_start_request(self) -> bool:
+        with self.lock:
+            if not self.pending_start:
+                return False
+            self.pending_start = False
+            return True
+
+    def consume_stop_request(self) -> bool:
+        with self.lock:
+            if not self.pending_stop:
+                return False
+            self.pending_stop = False
+            return True
+
+    def note_recording_started(self, backend_name: str) -> None:
+        with self.lock:
+            self.state = "recording"
+            self.backend_name = backend_name
+
+    def note_processing_started(self) -> None:
+        with self.lock:
+            self.state = "processing"
+            self.pending_stop = False
+            self.backend_name = None
+
+    def note_idle(self) -> None:
+        with self.lock:
+            self.state = "idle"
+            self.backend_name = None
+            self.pending_start = False
+            self.pending_stop = False
+
+
+class TriggerSocketServer:
+    def __init__(self, socket_path: Path, controller: TuiTriggerController) -> None:
+        self.socket_path = socket_path
+        self.controller = controller
+        self.stop_event: threading.Event | None = None
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        prepare_server_socket(self.socket_path)
+        ready_event = threading.Event()
+        startup_error: list[BaseException] = []
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(
+            target=self.run_server,
+            args=(self.stop_event, ready_event, startup_error),
+            daemon=True,
+        )
+        self.thread.start()
+        ready_event.wait(timeout=1.5)
+        if startup_error:
+            raise VoiceCliError(str(startup_error[0]))
+
+    def stop(self) -> None:
+        stop_event = self.stop_event
+        thread = self.thread
+        self.stop_event = None
+        self.thread = None
+        if stop_event:
+            stop_event.set()
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(0.1)
+                    probe.connect(str(self.socket_path))
+            except OSError:
+                pass
+        if thread and thread.is_alive():
+            thread.join(timeout=1.5)
+        try:
+            self.socket_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def run_server(
+        self,
+        stop_event: threading.Event,
+        ready_event: threading.Event,
+        startup_error: list[BaseException],
+    ) -> None:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(self.socket_path))
+                os.chmod(self.socket_path, 0o600)
+                server.listen()
+                server.settimeout(0.5)
+                ready_event.set()
+                while not stop_event.is_set():
+                    try:
+                        connection, _ = server.accept()
+                    except TimeoutError:
+                        continue
+                    except OSError as exc:
+                        if stop_event.is_set():
+                            break
+                        raise VoiceCliError(f"Voice trigger socket error: {exc}") from exc
+                    try:
+                        handle_daemon_connection(connection, self.controller)
+                    except BaseException as exc:
+                        print(f"Voice: trigger request failed: {exc}", file=sys.stderr, flush=True)
+        except BaseException as exc:
+            startup_error.append(exc)
+            ready_event.set()
+        finally:
+            try:
+                self.socket_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def run_tui_screen(
@@ -3108,8 +3351,12 @@ def run_tui_screen(
     view = TuiView(screen, model_state, args.language, args.hotkey, gpu_backend=gpu_backend)
     final_text: str | None = None
     should_run = args.auto_run or args.once
+    run_origin = "tui" if should_run else ""
     hotkey_event = threading.Event()
     hotkey_manager: X11HotkeyManager | None = None
+    trigger_controller: TuiTriggerController | None = None
+    trigger_server: TriggerSocketServer | None = None
+    wayland_socket_path = resolve_socket_path(getattr(args, "socket_path", None))
 
     if args.enable_hotkey:
         try:
@@ -3120,7 +3367,21 @@ def run_tui_screen(
         except VoiceCliError as exc:
             view.add_log(str(exc))
 
+    if wayland_session_active():
+        trigger_controller = TuiTriggerController()
+        try:
+            trigger_server = TriggerSocketServer(wayland_socket_path, trigger_controller)
+            trigger_server.start()
+            view.set_hotkey("ready (press H for setup)")
+            view.add_log("Wayland trigger ready inside TUI. Use GNOME custom shortcut: `voice trigger --action toggle`.")
+        except VoiceCliError as exc:
+            view.set_hotkey("unavailable (press H for help)")
+            view.add_log(f"Wayland trigger unavailable: {exc}")
+            view.add_log("Close any existing `voice daemon` and restart the TUI if you want the shortcut to target this TUI session.")
+
     def should_stop_recording() -> bool:
+        if trigger_controller and trigger_controller.consume_stop_request():
+            return True
         if hotkey_event.is_set():
             hotkey_event.clear()
             return True
@@ -3130,12 +3391,18 @@ def run_tui_screen(
         while True:
             view.draw()
 
+            if trigger_controller and trigger_controller.consume_start_request():
+                should_run = True
+                run_origin = "external"
             if hotkey_event.is_set():
                 hotkey_event.clear()
                 should_run = True
+                run_origin = "external"
 
             if should_run:
                 should_run = False
+                if trigger_controller:
+                    trigger_controller.start()
                 try:
                     final_text = run_tui_pipeline(
                         view,
@@ -3144,12 +3411,18 @@ def run_tui_screen(
                         whisper_cli,
                         llama_model,
                         llama_cli,
+                        trigger_controller,
+                        run_origin == "external",
                         should_stop_recording,
                     )
                 except BaseException as exc:
+                    if trigger_controller:
+                        trigger_controller.note_idle()
                     view.set_phase("Error", str(exc))
                     view.add_log(f"Error: {exc}")
                 finally:
+                    if trigger_controller:
+                        trigger_controller.note_idle()
                     hotkey_event.clear()
                     view.flush_input()
 
@@ -3161,7 +3434,10 @@ def run_tui_screen(
             if key in (ord("q"), ord("Q")):
                 return final_text
             if key in (ord("r"), ord("R"), ord("\n"), curses.KEY_ENTER):
+                if trigger_controller:
+                    trigger_controller.start()
                 should_run = True
+                run_origin = "tui"
             if key in (ord("m"), ord("M")):
                 run_model_manager(view, model_state)
             if key in (ord("l"), ord("L")):
@@ -3169,32 +3445,41 @@ def run_tui_screen(
             if key in (ord("s"), ord("S")):
                 run_settings_manager(view, args)
             if key in (ord("h"), ord("H")):
-                if hotkey_manager:
-                    hotkey_manager.stop()
-                try:
-                    view.set_phase("Record Shortcut", "Press the new global shortcut now.")
-                    view.add_log("Recording next X11 key combination.")
-                    new_hotkey = X11GlobalHotkey(args.hotkey).capture_next_hotkey()
-                    args.hotkey = new_hotkey
-                    save_hotkey(new_hotkey)
-                    view.set_hotkey(new_hotkey)
-                    if hotkey_manager:
-                        hotkey_manager.update(new_hotkey)
+                if wayland_session_active():
+                    run_wayland_shortcut_helper(view)
+                    if trigger_server:
+                        view.add_log("Wayland shortcut helper opened. TUI trigger is running; GNOME command is `voice trigger --action toggle`.")
                     else:
-                        hotkey_manager = X11HotkeyManager(new_hotkey, hotkey_event.set)
-                        hotkey_manager.start()
-                    view.set_phase("Ready", "Idle")
-                    view.add_log(f"Global hotkey updated: {new_hotkey}")
-                except BaseException as exc:
+                        view.add_log("Wayland shortcut helper opened. Start a trigger owner first; GNOME command is `voice trigger --action toggle`.")
+                else:
                     if hotkey_manager:
-                        hotkey_manager.start()
-                    view.set_phase("Error", str(exc))
-                    view.add_log(f"Hotkey capture failed: {exc}")
+                        hotkey_manager.stop()
+                    try:
+                        view.set_phase("Record Shortcut", "Press the new global shortcut now.")
+                        view.add_log("Recording next X11 key combination.")
+                        new_hotkey = X11GlobalHotkey(args.hotkey).capture_next_hotkey()
+                        args.hotkey = new_hotkey
+                        save_hotkey(new_hotkey)
+                        view.set_hotkey(new_hotkey)
+                        if hotkey_manager:
+                            hotkey_manager.update(new_hotkey)
+                        else:
+                            hotkey_manager = X11HotkeyManager(new_hotkey, hotkey_event.set)
+                            hotkey_manager.start()
+                        view.set_phase("Ready", "Idle")
+                        view.add_log(f"Global hotkey updated: {new_hotkey}")
+                    except BaseException as exc:
+                        if hotkey_manager:
+                            hotkey_manager.start()
+                        view.set_phase("Error", str(exc))
+                        view.add_log(f"Hotkey capture failed: {exc}")
 
             time.sleep(0.05)
     finally:
         if hotkey_manager:
             hotkey_manager.stop()
+        if trigger_server:
+            trigger_server.stop()
 
 
 def command_tui(args: argparse.Namespace) -> int:
@@ -4120,6 +4405,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tui = subparsers.add_parser("tui", help="Run the terminal UI MVP.")
     tui.add_argument("--whisper-model", help="Whisper model path. Defaults to the active downloaded model.")
+    tui.add_argument("--socket-path", help="Override the local Unix socket path for Wayland shortcut triggers.")
     tui.add_argument("--whisper-cli")
     tui.add_argument("--language", help="Whisper language code. Defaults to saved setting, initially en.")
     tui.add_argument("--whisper-timeout", type=float)
