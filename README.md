@@ -30,7 +30,7 @@
 - X11 global hotkey daemon (`voice hotkey`) for hands-free trigger from any window
 - Wayland desktop shortcut path through `voice daemon` + `voice trigger`
 - Auto-paste into the focused window via `xdotool` (X11 — key combo auto-detected via WM_CLASS, override with `--paste-key`), `wtype` (Wayland best effort), or the Wayland portal keyboard path after explicit setup
-- Clipboard copy through `wl-copy`, `xclip`, `xsel`, or OSC 52
+- Clipboard copy through `wl-copy` (Wayland), `xclip`, `xsel`, or OSC 52 terminal fallback
 - In-TUI Whisper model manager — browse, download, activate, and delete models
 - Settings screen (`S`) with persistent toggles for auto-paste, fast mode, and silence trim, plus a thread count stepper (Left/Right)
 - Fast mode skips the heuristic cleanup pass and enables silence trimming — recommended for slow or low-power devices
