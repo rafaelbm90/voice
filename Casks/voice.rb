@@ -1,19 +1,20 @@
-# Homebrew Cask template for Voice.
-# Copy this file to a separate tap repo: `rafaelbm/homebrew-voice`
-# so users can install via `brew tap rafaelbm/voice && brew install --cask voice`.
+# Homebrew Cask for Voice — a local-first dictation menu-bar app.
 #
-# Update `version` and `sha256` on every release.
-# Since the app is ad-hoc signed (not notarized), `brew install --cask` strips
-# the quarantine xattr on install, so users do NOT see a Gatekeeper warning.
+# Install:
+#   brew tap rbmrs/voice https://github.com/rbmrs/voice
+#   brew install --cask voice
+#
+# The 2-arg `brew tap` form is required because the repo is named `voice`,
+# not `homebrew-voice`. See https://docs.brew.sh/Taps.
 
 cask "voice" do
   version "0.1.0"
-  sha256 :no_check # replace with real sha after first release: shasum -a 256 Voice-x.y.z.dmg
+  sha256 "6beb108796aa7425c2785fdebb37487b06831807d8e4da5b33caf66bb053eefe"
 
-  url "https://github.com/rafaelbm/Voice/releases/download/v#{version}/Voice-#{version}.dmg"
+  url "https://github.com/rbmrs/voice/releases/download/v#{version}/Voice-#{version}.dmg"
   name "Voice"
   desc "Local-first dictation menu-bar app (whisper.cpp + llama.cpp)"
-  homepage "https://github.com/rafaelbm/Voice"
+  homepage "https://github.com/rbmrs/voice"
 
   livecheck do
     url :url
