@@ -45,6 +45,7 @@ final class AppCoordinator: ObservableObject {
         self.overlayController = overlayController
         self.permissions = permissionService.snapshot()
 
+        settings.autoHealToolPaths()
         registerHotkeys()
     }
 

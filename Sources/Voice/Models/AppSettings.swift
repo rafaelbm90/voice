@@ -237,6 +237,17 @@ final class AppSettings: ObservableObject {
         return true
     }
 
+    /// Re-runs discovery for any tool whose stored path no longer validates.
+    /// Call on launch so brew upgrades / fresh Cask installs Just Work without a Settings trip.
+    func autoHealToolPaths() {
+        if whisperExecutableValidation.status == .invalid {
+            resolveWhisperExecutable()
+        }
+        if llamaExecutableValidation.status == .invalid {
+            resolveLlamaExecutable()
+        }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         triggerMode = RecordingTriggerMode(rawValue: defaults.string(forKey: Keys.triggerMode.rawValue) ?? "") ?? .holdToTalk
@@ -301,33 +312,11 @@ final class AppSettings: ObservableObject {
     }
 
     private static func defaultExecutablePath(named name: String) -> String {
-        detectedExecutablePath(named: name) ?? executableSearchCandidates(named: name).first ?? name
+        detectedExecutablePath(named: name) ?? ToolDiscovery.executableSearchCandidates(named: name).first ?? name
     }
 
     private static func detectedExecutablePath(named name: String) -> String? {
-        executableSearchCandidates(named: name).first(where: { FileManager.default.isExecutableFile(atPath: $0) })
-    }
-
-    private static func executableSearchCandidates(named name: String) -> [String] {
-        let commonDirectories = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            NSHomeDirectory() + "/.local/bin",
-            NSHomeDirectory() + "/bin",
-        ]
-
-        let pathDirectories = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":")
-            .map(String.init)
-
-        let directories = (commonDirectories + pathDirectories).map(normalizedPath)
-        let candidates = directories.map { "\($0)/\(name)" }
-
-        var seen: Set<String> = []
-
-        return candidates.filter { candidate in
-            seen.insert(candidate).inserted
-        }
+        ToolDiscovery.findExecutable(named: name)
     }
 
     private func firstBlockingIssue(in validations: [PathValidation]) -> String? {

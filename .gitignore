@@ -9,3 +9,7 @@ DerivedData/
 __pycache__/
 *.pyc
 .codex
+/dist
+Resources/AppIcon.icns
+*.dmg
+*.zip
