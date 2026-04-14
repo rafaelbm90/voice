@@ -17,13 +17,35 @@ struct MenuBarView: View {
 
             if let lastInsertedText = coordinator.lastInsertedText {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Last Inserted")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(lastInsertedText)
-                        .font(.callout)
-                        .lineLimit(5)
-                        .textSelection(.enabled)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Last Inserted")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(lastInsertedText, forType: .string)
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    ScrollView {
+                        Text(lastInsertedText)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                    }
+                    .frame(maxHeight: 108)
+                    .scrollIndicators(.automatic)
+                    .scrollBounceBehavior(.basedOnSize)
+                    .background(.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
             }
 
