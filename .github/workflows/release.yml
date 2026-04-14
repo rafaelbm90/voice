@@ -1,0 +1,107 @@
+name: Release
+
+# Triggered by pushing a tag `v*`. Builds a universal macOS app bundle,
+# ad-hoc signs it, packages a DMG, creates a GitHub Release with the DMG
+# attached, and commits a cask version/sha256 bump to `main`.
+#
+# No Apple Developer ID required — ad-hoc signing is sufficient because the
+# Cask's postflight block strips the quarantine xattr on install.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode (for universal Swift builds)
+        run: |
+          # Pick the newest Xcode.app installed on the runner.
+          xcode_path=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n1)
+          echo "Selected: $xcode_path"
+          sudo xcode-select -s "$xcode_path"
+          xcodebuild -version
+          swift --version
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+
+      - name: Build universal .app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ github.run_number }}
+          UNIVERSAL: "1"
+        run: zsh scripts/build-app.sh
+
+      - name: Ad-hoc sign .app
+        run: zsh scripts/sign.sh
+
+      - name: Build DMG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: zsh scripts/make-dmg.sh
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DMG="dist/Voice-$VERSION.dmg"
+          SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "$SHA  $DMG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Voice-${{ steps.version.outputs.version }}.dmg
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ```bash
+            brew tap rbmrs/voice https://github.com/rbmrs/voice
+            brew install --cask voice
+            ```
+
+            Requires macOS 14 (Sonoma) or later. `whisper-cpp` + `llama.cpp` pulled in as Cask deps.
+
+            ## SHA256
+
+            ```
+            ${{ steps.sha.outputs.sha }}  Voice-${{ steps.version.outputs.version }}.dmg
+            ```
+
+      - name: Bump Casks/voice.rb on main
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          git fetch origin main
+          git checkout main
+          /usr/bin/sed -i '' -E "s/^  version \".*\"/  version \"$VERSION\"/" Casks/voice.rb
+          /usr/bin/sed -i '' -E "s/^  sha256 \"[a-f0-9]{64}\"/  sha256 \"$SHA\"/" Casks/voice.rb
+          if git diff --quiet Casks/voice.rb; then
+            echo "Cask already up-to-date, skipping commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/voice.rb
+          git commit -m "chore(cask): bump voice to $VERSION"
+          git push origin main
