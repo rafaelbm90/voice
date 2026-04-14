@@ -36,7 +36,7 @@ final class OverlayPanelController {
         hostingController.view.wantsLayer = true
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: OverlayView.preferredWidth, height: minimumPanelHeight),
+            contentRect: NSRect(x: 0, y: 0, width: OverlayView.fullWidth, height: minimumPanelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -60,14 +60,25 @@ final class OverlayPanelController {
     private func resizePanel() {
         guard let panel, let hostingController else { return }
 
-        let targetWidth = OverlayView.preferredWidth
-        hostingController.view.frame = NSRect(x: 0, y: 0, width: targetWidth, height: minimumPanelHeight)
-        hostingController.view.layoutSubtreeIfNeeded()
-        panel.contentView?.layoutSubtreeIfNeeded()
+        if currentState.isMinimalOverlay {
+            // Unconstrained measure so SwiftUI reports the natural one-line size.
+            hostingController.view.frame = NSRect(x: 0, y: 0, width: 1000, height: minimumPanelHeight)
+            hostingController.view.layoutSubtreeIfNeeded()
+            panel.contentView?.layoutSubtreeIfNeeded()
 
-        let fittingHeight = max(hostingController.view.fittingSize.height, minimumPanelHeight)
-        let targetHeight = min(fittingHeight, currentState.overlayMaxHeight)
-        panel.setContentSize(NSSize(width: targetWidth, height: targetHeight))
+            let fitting = hostingController.view.fittingSize
+            panel.setContentSize(NSSize(width: max(fitting.width, 80),
+                                        height: max(fitting.height, minimumPanelHeight)))
+        } else {
+            let targetWidth = OverlayView.fullWidth
+            hostingController.view.frame = NSRect(x: 0, y: 0, width: targetWidth, height: minimumPanelHeight)
+            hostingController.view.layoutSubtreeIfNeeded()
+            panel.contentView?.layoutSubtreeIfNeeded()
+
+            let fittingHeight = max(hostingController.view.fittingSize.height, minimumPanelHeight)
+            let targetHeight  = min(fittingHeight, currentState.overlayMaxHeight)
+            panel.setContentSize(NSSize(width: targetWidth, height: targetHeight))
+        }
     }
 
     private func positionPanel() {
