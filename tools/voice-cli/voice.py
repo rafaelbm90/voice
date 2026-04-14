@@ -756,38 +756,23 @@ def resolve_pipeline_resources(args: argparse.Namespace) -> PipelineResources:
 
 
 def copy_to_clipboard(text: str) -> str:
-    wl_copy = shutil.which("wl-copy")
-    if wl_copy:
-        try:
-            process = subprocess.Popen(
-                [wl_copy],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                start_new_session=True,
+    candidates: list[tuple[str, list[str]]] = []
+
+    # wl-copy only makes sense on a Wayland session.
+    if wayland_session_active() and shutil.which("wl-copy"):
+        candidates.append(("wl-copy", ["wl-copy"]))
+
+    for name in ("xclip", "xsel"):
+        if shutil.which(name):
+            command = (
+                ["xclip", "-selection", "clipboard"]
+                if name == "xclip"
+                else ["xsel", "--clipboard", "--input"]
             )
-            assert process.stdin is not None
-            process.stdin.write(text)
-            process.stdin.close()
-            time.sleep(0.2)
-        except OSError as exc:
-            raise VoiceCliError(f"Clipboard copy failed using wl-copy: {exc}") from exc
+            candidates.append((name, command))
 
-        # wl-copy may stay alive to own the clipboard selection. That is success.
-        if process.poll() is None:
-            return "wl-copy"
-
-        if process.returncode == 0:
-            return "wl-copy"
-        raise VoiceCliError(f"Clipboard copy failed using wl-copy: exit code {process.returncode}")
-
-    for name, command in [
-        ("xclip", ["xclip", "-selection", "clipboard"]),
-        ("xsel", ["xsel", "--clipboard", "--input"]),
-    ]:
-        if not shutil.which(name):
-            continue
+    last_error: str = ""
+    for name, command in candidates:
         try:
             process = subprocess.Popen(
                 command,
@@ -800,16 +785,16 @@ def copy_to_clipboard(text: str) -> str:
             assert process.stdin is not None
             process.stdin.write(text)
             process.stdin.close()
-            time.sleep(0.05)
+            time.sleep(0.2 if name == "wl-copy" else 0.05)
         except OSError as exc:
-            raise VoiceCliError(f"Clipboard copy failed using {name}: {exc}") from exc
+            last_error = f"{name}: {exc}"
+            continue
 
-        if process.poll() is None:
+        # wl-copy may stay alive to own the clipboard selection — that is success.
+        if process.poll() is None or process.returncode == 0:
             return name
 
-        if process.returncode == 0:
-            return name
-        raise VoiceCliError(f"Clipboard copy failed using {name}: exit code {process.returncode}")
+        last_error = f"{name}: exit code {process.returncode}"
 
     if sys.stderr.isatty():
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
@@ -817,7 +802,8 @@ def copy_to_clipboard(text: str) -> str:
         sys.stderr.flush()
         return "OSC 52"
 
-    raise VoiceCliError("Clipboard copy requires wl-copy, xclip, xsel, or an OSC 52-capable terminal.")
+    detail = f" ({last_error})" if last_error else ""
+    raise VoiceCliError(f"Clipboard copy requires wl-copy, xclip, xsel, or an OSC 52-capable terminal{detail}.")
 
 
 def auto_paste(delay_ms: int, paste_tool: str = "auto", paste_key: str = "auto") -> str:
@@ -1666,7 +1652,6 @@ def transcribe_audio(
             "--output-txt",
             "--output-file",
             output_base,
-            "--no-prints",
             "--no-timestamps",
             "--language",
             language,
@@ -1685,6 +1670,11 @@ def transcribe_audio(
         result = run_command(args, timeout=timeout, status_label="Transcribing")
         if result.returncode != 0:
             details = result.stderr.strip() or result.stdout.strip()
+            if result.returncode == 127 and not details:
+                details = (
+                    f"Binary not found or missing shared library.\n"
+                    f"Run: ldd {wrapped_executable_target(whisper_cli)}"
+                )
             raise VoiceCliError(f"whisper-cli failed with exit code {result.returncode}.\n{details}")
 
         if output_txt.exists():
