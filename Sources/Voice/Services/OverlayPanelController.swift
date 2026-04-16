@@ -2,29 +2,41 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class OverlayPanelController {
+final class OverlayPanelController: NSObject {
     private let minimumPanelHeight: CGFloat = 92
+    private let delayedRefreshDuration: Duration = .milliseconds(200)
+
     private var panel: NSPanel?
     private var hostingController: NSHostingController<OverlayView>?
     private var currentState: DictationState = .idle
+    private var isPresented = false
+    private var refreshGeneration: UInt64 = 0
+    private var delayedRefreshTask: Task<Void, Never>?
+
+    override init() {
+        super.init()
+        registerObservers()
+    }
+
+    deinit {
+        delayedRefreshTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
 
     func show(state: DictationState) {
         ensurePanel()
         currentState = state
-        hostingController?.rootView = OverlayView(state: state)
-        resizePanel()
-        panel?.orderFrontRegardless()
-        positionPanel()
-
-        // The first time a non-activating panel is shown, AppKit can resolve its
-        // screen assignment and final fitting size one tick later.
-        DispatchQueue.main.async { [weak self] in
-            self?.resizePanel()
-            self?.positionPanel()
-        }
+        isPresented = true
+        scheduleRefresh(reason: "show")
     }
 
     func hide() {
+        refreshGeneration &+= 1
+        delayedRefreshTask?.cancel()
+        delayedRefreshTask = nil
+        isPresented = false
+        currentState = .idle
         panel?.orderOut(nil)
     }
 
@@ -43,18 +55,123 @@ final class OverlayPanelController {
         )
 
         panel.contentViewController = hostingController
+        configurePanel(panel)
+
+        self.panel = panel
+        self.hostingController = hostingController
+    }
+
+    private func configurePanel(_ panel: NSPanel) {
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
         panel.ignoresMouseEvents = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.animationBehavior = .utilityWindow
+        panel.isReleasedWhenClosed = false
+    }
 
-        self.panel = panel
-        self.hostingController = hostingController
+    private func registerObservers() {
+        let workspaceNotificationCenter = NSWorkspace.shared.notificationCenter
+
+        workspaceNotificationCenter.addObserver(
+            self,
+            selector: #selector(handleOverlayRefreshNotification(_:)),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
+        workspaceNotificationCenter.addObserver(
+            self,
+            selector: #selector(handleOverlayRefreshNotification(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        workspaceNotificationCenter.addObserver(
+            self,
+            selector: #selector(handleOverlayRefreshNotification(_:)),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleOverlayRefreshNotification(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+    }
+
+    @objc
+    private nonisolated func handleOverlayRefreshNotification(_ notification: Notification) {
+        let reason = Self.refreshReason(for: notification.name)
+
+        Task { @MainActor [weak self] in
+            self?.scheduleRefresh(reason: reason)
+        }
+    }
+
+    private nonisolated static func refreshReason(for name: Notification.Name) -> String {
+        switch name {
+        case NSWorkspace.activeSpaceDidChangeNotification:
+            "active-space-changed"
+        case NSWorkspace.didWakeNotification:
+            "did-wake"
+        case NSWorkspace.screensDidWakeNotification:
+            "screens-did-wake"
+        case NSApplication.didChangeScreenParametersNotification:
+            "screen-parameters-changed"
+        default:
+            "overlay-refresh"
+        }
+    }
+
+    private func scheduleRefresh(reason: String) {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        let delayedRefreshDelay = delayedRefreshDuration
+
+        delayedRefreshTask?.cancel()
+        delayedRefreshTask = nil
+
+        refreshPresentedOverlay(reason: reason)
+
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            self.refreshPresentedOverlayIfCurrent(reason: "\(reason)-next-runloop", generation: generation)
+        }
+
+        delayedRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: delayedRefreshDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.refreshPresentedOverlayIfCurrent(reason: "\(reason)-delayed", generation: generation)
+        }
+    }
+
+    private func refreshPresentedOverlayIfCurrent(reason: String, generation: UInt64) {
+        guard generation == refreshGeneration else { return }
+        refreshPresentedOverlay(reason: reason)
+    }
+
+    private func refreshPresentedOverlay(reason _: String) {
+        guard isPresented else { return }
+
+        ensurePanel()
+
+        guard let panel, let hostingController else { return }
+
+        hostingController.rootView = OverlayView(state: currentState)
+        configurePanel(panel)
+        resizePanel()
+
+        let targetScreen = preferredScreen(for: panel)
+        let shouldForceRecenter = !panelFrameIntersectsConnectedScreen(panel.frame)
+        let targetFrame = targetFrame(for: panel, on: targetScreen, forceRecenter: shouldForceRecenter)
+
+        panel.setFrame(targetFrame, display: false)
+        panel.orderFrontRegardless()
     }
 
     private func resizePanel() {
@@ -81,17 +198,15 @@ final class OverlayPanelController {
         }
     }
 
-    private func positionPanel() {
-        guard let panel else { return }
-
-        let screen = activeScreen(for: panel) ?? NSScreen.main
-        let screenFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let visibleFrame = screen?.visibleFrame ?? screenFrame
+    private func targetFrame(for panel: NSPanel, on screen: NSScreen?, forceRecenter: Bool) -> NSRect {
+        let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first
+        let screenFrame = targetScreen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let visibleFrame = targetScreen?.visibleFrame ?? screenFrame
         let menuBarInset = max(screenFrame.maxY - visibleFrame.maxY, 0)
         let topPadding: CGFloat = 12
         let horizontalInset: CGFloat = 12
 
-        let origin = NSPoint(
+        let centeredFrame = NSRect(
             x: max(
                 visibleFrame.minX + horizontalInset,
                 min(
@@ -102,17 +217,69 @@ final class OverlayPanelController {
             y: max(
                 visibleFrame.minY,
                 screenFrame.maxY - menuBarInset - panel.frame.height - topPadding
+            ),
+            width: panel.frame.width,
+            height: panel.frame.height
+        )
+
+        guard let targetScreen else {
+            return centeredFrame
+        }
+
+        let currentFrame = panel.frame
+        let isCurrentFrameOnTargetScreen = targetScreen.frame.intersects(currentFrame)
+
+        guard !forceRecenter, isCurrentFrameOnTargetScreen else {
+            return centeredFrame
+        }
+
+        let clampedOrigin = NSPoint(
+            x: max(
+                visibleFrame.minX + horizontalInset,
+                min(currentFrame.origin.x, visibleFrame.maxX - currentFrame.width - horizontalInset)
+            ),
+            y: max(
+                visibleFrame.minY,
+                min(currentFrame.origin.y, screenFrame.maxY - menuBarInset - currentFrame.height - topPadding)
             )
         )
 
-        panel.setFrameOrigin(origin)
+        return NSRect(origin: clampedOrigin, size: currentFrame.size)
     }
 
-    private func activeScreen(for panel: NSPanel) -> NSScreen? {
+    private func preferredScreen(for panel: NSPanel) -> NSScreen? {
         let mouseLocation = NSEvent.mouseLocation
 
-        return NSScreen.screens.first(where: { screen in
+        if let mouseScreen = NSScreen.screens.first(where: { screen in
             screen.frame.contains(mouseLocation)
-        }) ?? panel.screen
+        }) {
+            return mouseScreen
+        }
+
+        if let panelScreen = connectedScreen(matching: panel.screen) {
+            return panelScreen
+        }
+
+        if let mainScreen = NSScreen.main {
+            return mainScreen
+        }
+
+        return NSScreen.screens.first
+    }
+
+    private func connectedScreen(matching candidate: NSScreen?) -> NSScreen? {
+        guard let candidate else { return nil }
+
+        let candidateNumber = candidate.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+
+        return NSScreen.screens.first { screen in
+            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber) == candidateNumber
+        }
+    }
+
+    private func panelFrameIntersectsConnectedScreen(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { screen in
+            screen.frame.intersects(frame)
+        }
     }
 }
