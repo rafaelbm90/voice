@@ -9,6 +9,10 @@
 - **macOS** — native menu-bar app
 - **Linux** — terminal-first TUI under `tools/voice-cli`
 
+## Development approach
+
+This repository was built with the help of AI coding assistants in an agentic, human-supervised workflow. The assistants sped up implementation, iteration, and documentation, while project direction, review, and final decisions remained with the maintainer.
+
 ## Features
 
 - On-device transcription with `whisper.cpp`
