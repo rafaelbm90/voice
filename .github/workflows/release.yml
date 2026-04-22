@@ -40,6 +40,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version $VERSION"
 
+      - name: Extract release summary
+        id: summary
+        run: |
+          SUMMARY=$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:subject)' | head -n1)
+          if [ -z "$SUMMARY" ] || [ "$SUMMARY" = "$GITHUB_REF_NAME" ]; then
+            SUMMARY=$(git log -1 --format=%s "$GITHUB_SHA")
+          fi
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+
       - name: Build universal .app
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -72,6 +81,10 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           body: |
+            ## What Changed
+
+            ${{ steps.summary.outputs.summary }}
+
             ## Install
 
             ```bash

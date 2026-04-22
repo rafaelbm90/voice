@@ -24,6 +24,8 @@ There is no committed automated test suite yet. Before submitting app changes, r
 
 Recent commits use short imperative subjects, for example `Tighten README for conciseness` and `Add managed model downloads and llama refinement fixes`. Keep commits scoped to one behavior or documentation change. Pull requests should describe the user-visible change, list manual verification commands, link related issues when applicable, and include screenshots or terminal output for UI/TUI changes.
 
+When cutting a release tag, use an annotated tag with a one-line summary, for example `git tag -a v0.1.5 -m "Fix popup centering after send"`. The release workflow prepends that summary to the GitHub Release notes.
+
 ## Security & Configuration Tips
 
 Do not commit local model files, generated audio, or machine-specific paths. Keep Whisper and Llama model locations configurable through Settings, CLI flags, or `VOICE_*` environment variables.
