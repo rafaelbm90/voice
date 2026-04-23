@@ -8,6 +8,7 @@ enum DictationState: Equatable {
     case refining
     case inserting
     case completed(String)
+    case languageSwitched(String)
     case cancelled
     case error(String)
 
@@ -25,6 +26,8 @@ enum DictationState: Equatable {
             "Typing"
         case .completed:
             "Inserted"
+        case .languageSwitched:
+            "Language"
         case .cancelled:
             "Cancelled"
         case .error:
@@ -46,6 +49,8 @@ enum DictationState: Equatable {
             "keyboard"
         case .completed:
             "checkmark.circle.fill"
+        case .languageSwitched:
+            "globe"
         case .cancelled:
             "xmark.circle.fill"
         case .error:
@@ -67,6 +72,8 @@ enum DictationState: Equatable {
             "Inserting"
         case .completed:
             "Inserted"
+        case .languageSwitched:
+            "Language Switched"
         case .cancelled:
             "Cancelled"
         case .error:
@@ -88,6 +95,8 @@ enum DictationState: Equatable {
             "Sending the final text to the focused app."
         case .completed(let text):
             text
+        case .languageSwitched(let title):
+            "Transcription will use \(title)."
         case .cancelled:
             ""
         case .error(let message):
@@ -105,7 +114,7 @@ enum DictationState: Equatable {
 
     var overlayDetailLineLimit: Int {
         switch self {
-        case .completed, .error:
+        case .completed, .languageSwitched, .error:
             5
         default:
             2
@@ -114,7 +123,7 @@ enum DictationState: Equatable {
 
     var overlayMaxHeight: CGFloat {
         switch self {
-        case .completed, .error:
+        case .completed, .languageSwitched, .error:
             220
         default:
             128

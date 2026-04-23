@@ -21,7 +21,8 @@ final class AppCoordinator: ObservableObject {
     private let overlayController: OverlayPanelController
 
     private var activePipelineTask: Task<Void, Never>?
-    private var escapeMonitor: Any?
+    private var globalEscapeMonitor: Any?
+    private var localEscapeMonitor: Any?
 
     init(
         settings: AppSettings = AppSettings(),
@@ -102,13 +103,21 @@ final class AppCoordinator: ObservableObject {
     }
 
     private func registerHotkeys() {
-        // Global Escape monitor — cancels any active dictation state.
-        // keyCode 53 = Escape; only fires when dictation is in progress.
-        escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Listen for Escape both inside Voice windows and while another app is focused.
+        // keyCode 53 = Escape.
+        globalEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard event.keyCode == 53 else { return }
             Task { @MainActor [weak self] in
                 self?.cancel()
             }
+        }
+
+        localEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return event }
+            Task { @MainActor [weak self] in
+                self?.cancel()
+            }
+            return event
         }
 
         KeyboardShortcuts.onKeyDown(for: .dictationTrigger) { [weak self] in
@@ -132,6 +141,12 @@ final class AppCoordinator: ObservableObject {
                 guard let self else { return }
                 guard self.settings.triggerMode == .holdToTalk else { return }
                 await self.stopRecordingAndProcess()
+            }
+        }
+
+        KeyboardShortcuts.onKeyUp(for: .preferredWhisperLanguageCycle) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.cyclePreferredWhisperLanguage()
             }
         }
     }
@@ -234,6 +249,21 @@ final class AppCoordinator: ObservableObject {
         }
 
         return true
+    }
+
+    private func cyclePreferredWhisperLanguage() {
+        guard activePipelineTask == nil else { return }
+        guard !state.isRecording else { return }
+
+        switch settings.cyclePreferredWhisperLanguage() {
+        case .switched(let title):
+            lastErrorMessage = nil
+            transition(to: .languageSwitched(title))
+            scheduleReset(after: .seconds(1.2), expectedState: state)
+        case .unavailable(let message):
+            present(DictationServiceError.configuration(message))
+            scheduleReset(after: .seconds(1.6), expectedState: state)
+        }
     }
 
     private func activeRefiner() -> TextRefining {

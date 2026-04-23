@@ -23,6 +23,11 @@ struct PathValidation {
     }
 }
 
+enum PreferredWhisperLanguageCycleResult: Equatable {
+    case switched(title: String)
+    case unavailable(String)
+}
+
 enum RecordingTriggerMode: String, CaseIterable, Identifiable {
     case holdToTalk
     case toggle
@@ -103,6 +108,8 @@ enum RefinementProfile: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AppSettings: ObservableObject {
+    private static let unsetPreferredWhisperLanguageCode = ""
+
     static let whisperLanguageOptions: [WhisperLanguageOption] = [
         WhisperLanguageOption(code: "auto", title: "Auto Detect"),
         WhisperLanguageOption(code: "en", title: "English"),
@@ -123,11 +130,17 @@ final class AppSettings: ObservableObject {
         WhisperLanguageOption(code: "zh", title: "Chinese"),
     ]
 
+    static let preferredWhisperLanguageOptions: [WhisperLanguageOption] = [
+        WhisperLanguageOption(code: AppSettings.unsetPreferredWhisperLanguageCode, title: "Not Set"),
+    ] + whisperLanguageOptions.filter { $0.code != "auto" }
+
     @Published var triggerMode: RecordingTriggerMode
     @Published var insertionMode: TextInsertionMode
     @Published var whisperExecutablePath: String
     @Published var whisperModelPath: String
     @Published var whisperLanguage: String
+    @Published var preferredWhisperLanguageOne: String
+    @Published var preferredWhisperLanguageTwo: String
     @Published var enableRefinement: Bool
     @Published var refinementBackend: RefinementBackend
     @Published var refinementProfile: RefinementProfile
@@ -212,9 +225,42 @@ final class AppSettings: ObservableObject {
         return normalizedWhisperLanguage
     }
 
+    var configuredPreferredWhisperLanguages: [String] {
+        Self.uniqueLanguageCodes([
+            Self.normalizedPreferredWhisperLanguageCode(preferredWhisperLanguageOne),
+            Self.normalizedPreferredWhisperLanguageCode(preferredWhisperLanguageTwo),
+        ])
+        .filter { !$0.isEmpty }
+    }
+
     var isEnglishOnlyWhisperModel: Bool {
         let filename = URL(fileURLWithPath: whisperModelPath).lastPathComponent.lowercased()
         return filename.contains(".en.") || filename.hasSuffix(".en.bin")
+    }
+
+    func cyclePreferredWhisperLanguage() -> PreferredWhisperLanguageCycleResult {
+        let cycleableLanguages: [String]
+        if isEnglishOnlyWhisperModel {
+            cycleableLanguages = configuredPreferredWhisperLanguages.filter { $0 == "en" }
+        } else {
+            cycleableLanguages = configuredPreferredWhisperLanguages
+        }
+
+        guard !cycleableLanguages.isEmpty else {
+            return .unavailable(preferredWhisperLanguageCycleUnavailableMessage)
+        }
+
+        let currentLanguage = effectiveWhisperLanguage
+        let nextLanguage: String
+
+        if let currentIndex = cycleableLanguages.firstIndex(of: currentLanguage) {
+            nextLanguage = cycleableLanguages[(currentIndex + 1) % cycleableLanguages.count]
+        } else {
+            nextLanguage = cycleableLanguages[0]
+        }
+
+        whisperLanguage = nextLanguage
+        return .switched(title: whisperLanguageTitle(for: nextLanguage))
     }
 
     @discardableResult
@@ -255,6 +301,8 @@ final class AppSettings: ObservableObject {
         whisperExecutablePath = defaults.string(forKey: Keys.whisperExecutablePath.rawValue) ?? Self.defaultExecutablePath(named: "whisper-cli")
         whisperModelPath = defaults.string(forKey: Keys.whisperModelPath.rawValue) ?? ""
         whisperLanguage = Self.normalizedWhisperLanguageCode(defaults.string(forKey: Keys.whisperLanguage.rawValue))
+        preferredWhisperLanguageOne = Self.normalizedPreferredWhisperLanguageCode(defaults.string(forKey: Keys.preferredWhisperLanguageOne.rawValue))
+        preferredWhisperLanguageTwo = Self.normalizedPreferredWhisperLanguageCode(defaults.string(forKey: Keys.preferredWhisperLanguageTwo.rawValue))
         enableRefinement = defaults.object(forKey: Keys.enableRefinement.rawValue) as? Bool ?? true
         refinementBackend = RefinementBackend(rawValue: defaults.string(forKey: Keys.refinementBackend.rawValue) ?? "") ?? .heuristic
         refinementProfile = RefinementProfile(rawValue: defaults.string(forKey: Keys.refinementProfile.rawValue) ?? "") ?? .balanced
@@ -286,6 +334,16 @@ final class AppSettings: ObservableObject {
         $whisperLanguage
             .map(Self.normalizedWhisperLanguageCode)
             .sink { [defaults] in defaults.set($0, forKey: Keys.whisperLanguage.rawValue) }
+            .store(in: &cancellables)
+
+        $preferredWhisperLanguageOne
+            .map(Self.normalizedPreferredWhisperLanguageCode)
+            .sink { [defaults] in defaults.set($0, forKey: Keys.preferredWhisperLanguageOne.rawValue) }
+            .store(in: &cancellables)
+
+        $preferredWhisperLanguageTwo
+            .map(Self.normalizedPreferredWhisperLanguageCode)
+            .sink { [defaults] in defaults.set($0, forKey: Keys.preferredWhisperLanguageTwo.rawValue) }
             .store(in: &cancellables)
 
         $enableRefinement
@@ -328,8 +386,32 @@ final class AppSettings: ObservableObject {
         return whisperLanguageOptions.contains(where: { $0.code == trimmed }) ? trimmed : "auto"
     }
 
+    private static func normalizedPreferredWhisperLanguageCode(_ value: String?) -> String {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return preferredWhisperLanguageOptions.contains(where: { $0.code == trimmed }) ? trimmed : unsetPreferredWhisperLanguageCode
+    }
+
+    private static func uniqueLanguageCodes(_ values: [String]) -> [String] {
+        values.reduce(into: [String]()) { result, value in
+            guard !result.contains(value) else { return }
+            result.append(value)
+        }
+    }
+
     private func whisperLanguageTitle(for code: String) -> String {
         Self.whisperLanguageOptions.first(where: { $0.code == code })?.title ?? code
+    }
+
+    private var preferredWhisperLanguageCycleUnavailableMessage: String {
+        if configuredPreferredWhisperLanguages.isEmpty {
+            return "Set Preferred Language 1 or 2 before using the switch-language shortcut."
+        }
+
+        if isEnglishOnlyWhisperModel {
+            return "This Whisper model appears to be English-only. Set a preferred language to English before using the switch-language shortcut."
+        }
+
+        return "No preferred languages are available for switching."
     }
 
     private static func validateExecutable(path: String, displayName: String, expectedName: String) -> PathValidation {
@@ -389,6 +471,8 @@ final class AppSettings: ObservableObject {
         case whisperExecutablePath
         case whisperModelPath
         case whisperLanguage
+        case preferredWhisperLanguageOne
+        case preferredWhisperLanguageTwo
         case enableRefinement
         case refinementBackend
         case refinementProfile

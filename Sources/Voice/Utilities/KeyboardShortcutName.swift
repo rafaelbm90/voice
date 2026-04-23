@@ -6,4 +6,6 @@ extension KeyboardShortcuts.Name {
         "dictationTrigger",
         default: .init(.v, modifiers: [.command, .shift])
     )
+
+    static let preferredWhisperLanguageCycle = Self("preferredWhisperLanguageCycle")
 }

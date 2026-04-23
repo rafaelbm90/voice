@@ -78,7 +78,7 @@ struct OverlayView: View {
             .secondary
         case .listening:
             .red
-        case .transcribing, .refining, .inserting:
+        case .transcribing, .refining, .inserting, .languageSwitched:
             .blue
         case .completed:
             .green

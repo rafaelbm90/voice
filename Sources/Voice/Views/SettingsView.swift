@@ -20,6 +20,24 @@ struct SettingsView: View {
                         Text(mode.title).tag(mode)
                     }
                 }
+
+                KeyboardShortcuts.Recorder("Switch Language Shortcut", name: .preferredWhisperLanguageCycle)
+
+                Picker("Preferred Language 1", selection: $settings.preferredWhisperLanguageOne) {
+                    ForEach(AppSettings.preferredWhisperLanguageOptions) { option in
+                        Text(option.title).tag(option.code)
+                    }
+                }
+
+                Picker("Preferred Language 2", selection: $settings.preferredWhisperLanguageTwo) {
+                    ForEach(AppSettings.preferredWhisperLanguageOptions) { option in
+                        Text(option.title).tag(option.code)
+                    }
+                }
+
+                Text("The switch-language shortcut cycles the active transcription language between the preferred languages above.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Current Status") {
@@ -97,7 +115,7 @@ struct SettingsView: View {
                     )
                 }
 
-                settingsRow(title: "Language") {
+                settingsRow(title: "Active Language") {
                     HStack(spacing: 10) {
                         ValidationMessage(validation: settings.whisperLanguageValidation)
 
