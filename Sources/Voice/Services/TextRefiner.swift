@@ -162,6 +162,7 @@ final class LlamaCppTextRefiner: TextRefining {
 
         var finalText = collected.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         finalText = stripTrailingSentinels(from: finalText)
+        finalText = stripWrappingQuotes(from: finalText)
         return finalText
     }
 
@@ -188,6 +189,17 @@ final class LlamaCppTextRefiner: TextRefining {
                 with: "",
                 options: .regularExpression
             )
+        }
+
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func stripWrappingQuotes(from text: String) -> String {
+        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if cleaned.hasPrefix("\""), cleaned.hasSuffix("\""), cleaned.count > 1 {
+            cleaned.removeFirst()
+            cleaned.removeLast()
         }
 
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
