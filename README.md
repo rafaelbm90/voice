@@ -18,7 +18,7 @@ This repository was built with the help of AI coding assistants in an agentic, h
 - On-device transcription with `whisper.cpp`
 - Optional second-pass cleanup with a built-in heuristic pass or `llama.cpp`
 - Global shortcut and floating status overlay on macOS
-- System-wide text insertion on macOS via pasteboard restore or direct keystrokes
+- System-wide text insertion on macOS via pasteboard or direct keystrokes, with each result kept on the clipboard
 - TUI workflow on Linux with built-in model management
 - Managed model downloads, activation, and deletion on both platforms
 

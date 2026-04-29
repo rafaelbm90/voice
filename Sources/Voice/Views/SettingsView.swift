@@ -236,9 +236,9 @@ struct SettingsView: View {
     private var insertionModeDescription: String {
         switch settings.insertionMode {
         case .pasteboard:
-            "Pastes the result, then restores your clipboard."
+            "Pastes the result and keeps it on your clipboard."
         case .keystrokes:
-            "Types the result directly without using the clipboard."
+            "Types the result directly and keeps it on your clipboard."
         }
     }
 

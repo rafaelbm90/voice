@@ -94,6 +94,7 @@ struct MenuBarView: View {
 
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(150))
+            (NSApp.delegate as? AppDelegate)?.prepareForStandardWindowPresentation()
             NSApp.activate(ignoringOtherApps: true)
             openSettings()
             scheduleSettingsWindowRaise(after: .milliseconds(50))
@@ -122,6 +123,7 @@ struct MenuBarView: View {
         guard let settingsWindow else { return }
 
         settingsWindow.title = "Voice Settings"
+        settingsWindow.isReleasedWhenClosed = false
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow.makeKeyAndOrderFront(nil)
         settingsWindow.orderFrontRegardless()

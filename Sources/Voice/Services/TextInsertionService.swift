@@ -5,31 +5,35 @@ import Foundation
 @MainActor
 final class TextInsertionService {
     func insert(text: String, mode: TextInsertionMode) async throws {
+        try copyToPasteboard(text)
+
         guard AXIsProcessTrusted() else {
             throw DictationServiceError.permission("Accessibility access is required to insert text.")
         }
 
         switch mode {
         case .pasteboard:
-            try await pasteUsingPasteboard(text)
+            try await pasteUsingPasteboard()
         case .keystrokes:
             try typeUsingUnicodeEvents(text)
         }
     }
 
-    private func pasteUsingPasteboard(_ text: String) async throws {
+    private func copyToPasteboard(_ text: String) throws {
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
 
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
+            snapshot.restore(to: pasteboard)
             throw DictationServiceError.insertionFailure("The pasteboard could not be updated for insertion.")
         }
+    }
 
+    private func pasteUsingPasteboard() async throws {
         try postKeyPress(keyCode: 9, flags: .maskCommand)
 
         try? await Task.sleep(for: .milliseconds(250))
-        snapshot.restore(to: pasteboard)
     }
 
     private func typeUsingUnicodeEvents(_ text: String) throws {
