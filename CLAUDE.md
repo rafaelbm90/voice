@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Sync rule:** `AGENTS.md` is a pointer to this file. If you change the guidance here, check that `AGENTS.md` still describes it accurately — never let the two drift into two sets of rules.
+
 ## What This Is
 
 Local-first dictation app. Two separate implementations sharing the same external tool pipeline (whisper.cpp + llama.cpp subprocesses):
@@ -68,6 +70,16 @@ Key environment variables: `VOICE_WHISPER_MODEL`, `VOICE_LANGUAGE`, `VOICE_REFIN
 
 - Swift: 4-space indent, Swift 6 strict concurrency, `PascalCase` types, `camelCase` members. Services layer owns all external process/audio/model logic; Views stay thin.
 - Python: stdlib-first, `snake_case` functions, type hints where useful, user-facing errors via `VoiceCliError`.
+
+## Commits & Releases
+
+Short imperative subjects, one behavior or doc change per commit. PRs describe the
+user-visible change, list the manual verification commands run, and include terminal
+output or screenshots for UI/TUI changes.
+
+Release tags are annotated with a one-line summary — `git tag -a v0.1.5 -m "Fix popup
+centering after send"`. The release workflow prepends that summary to the GitHub
+Release notes, so it is user-facing.
 
 ## Important Constraints
 
